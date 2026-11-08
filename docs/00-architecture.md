@@ -131,6 +131,8 @@ niri 的构建方式是把官方源码、`niri.patch` 和 Anland 后端 overlay 
 | `ASEbrahim/MaliBridge` | MaliBridge 上游；AFBC 修复在 PR #71 | 上游 |
 | 本仓库 | 设备补丁、主机侧脚本、打包工具、文档 | 已创建 |
 
+镜像构建阶段按 `XRING_O3_KIT_REF` 拉取本仓库；离线或 GitHub 不可达时，需要把 `XRING_O3_KIT_REPO` 指到可达镜像。当前 builder 提交 `bfa30f4` 对应 kit 快照 `c71d58e`。
+
 ## 6. 版本与校验
 
 | 对象 | 版本/校验 |
