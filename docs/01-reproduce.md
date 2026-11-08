@@ -92,7 +92,7 @@ budget.conf   4096 / 2048 / 2048 / 60000
 | `mali_stack_bundle_url` | `xring-o3-mali-stack-2026.11.08-v2.tar.zst` 的下载地址 |
 | `mali_stack_bundle_sha256` | `159ddd879241df78baa2f476e38ac1756e1a9b44c778bd0b8b7c18e50389c08d` |
 | `mali_stack_version` | `2026.11.08` |
-| `wayland_package_repository` | 带 Touch/AFBC 的 niri 包仓库；未构建时留空，使用上游包 |
+| `wayland_package_repository` | `collegeming/xring-o3-droidspaces-package`（已发布带 Touch/AFBC 的 `anland-niri-packages`） |
 
 `device_profile=xring-o3` 会强制 `ENABLE_mesa=true`，并在缺少 bundle URL/SHA 时直接失败，避免产出无 GPU 栈的镜像。
 

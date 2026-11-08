@@ -125,13 +125,30 @@ niri 的构建方式是把官方源码、`niri.patch` 和 Anland 后端 overlay 
 | --- | --- | --- |
 | `collegeming/Droidspaces-Arch-Niri-rootfs-builder` `xring-o3-mali` | rootfs 镜像构建：设备脚本按固定 commit 拉取、Mali 栈、偏好阶段 | 已推送，HEAD `95fe284` |
 | `collegeming/mesa-cross` | 历史 Mesa/MaliBridge CI；构建 workflow 已迁到本仓库 `.github/workflows/build-mesa.yml`、`build-malibridge.yml` | 只读保留，待新 workflow 验证后停用 |
-| `Goldzxcbug/droidspaces-package` | Anland/niri 预编译包的 CI 与 Release | 上游发布仓库 |
+| `Goldzxcbug/droidspaces-package` | Anland/niri 预编译包的上游 CI 与 Release | 上游参考 |
+| 本仓库 `anland-niri-packages` | 带 Touch + AFBC 的 niri 包、xorg-xwayland、manifest | 已发布 |
 | `Goldzxcbug/anland` | Anland 上游的 fork，当前多 2 个 HUD 提交 | 上游打包源 |
 | `SuperTurtleDev/anland` | Anland 上游主体 | 基线 |
 | `ASEbrahim/MaliBridge` | MaliBridge 上游；AFBC 修复在 PR #71 | 上游 |
 | 本仓库 | 设备补丁、主机侧脚本、打包工具、文档 | 已创建 |
 
 镜像构建阶段按 `XRING_O3_KIT_REF` 拉取本仓库；离线或 GitHub 不可达时，需要把 `XRING_O3_KIT_REPO` 指到可达镜像。当前 builder 提交 `95fe284` 对应 kit 快照 `c71d58e`。
+
+### 5.1 可复现性核对
+
+`build-mesa.yml` 与 `build-malibridge.yml` 的 artifacts 与已发布 stack v2 的对应文件逐个 SHA256 一致：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| Mesa dt `libEGL_mesa.so.0` | `b78067eb84452b23fb63b96360e22db41fda65b7eb11bbad1a8a254aff4c9bd1` |
+| Mesa dt `libgallium-26.3.0-devel.so` | `cbc8165ebfee355f7f5d835e2fe8c5c49b7b025a06f5973591147d0b843f1b48` |
+| Mesa dt `dri/zink_dri.so` | `89aab1520fab91f1ebb8b42b5939db8f942027cfec20a21b3c8c396fe16a959a` |
+| Mesa kopper `libgallium-26.3.0-devel.so` | `0d4976c165235774f0fc9a4f532cb662b9149e3729933fb12d57fc4c9071d604` |
+| MaliBridge hook2 client | `afb10215b1a2e7fcac7f9560b9eb6e5acc3ea31e4d07a7045bec82218d137b37` |
+| MaliBridge format client | `f7b19ff880aa7e8fb2fe2bedc8d788745be345cdeaaaa276722ebc947fbc6dc4` |
+| wl-gone shim | `c2cc0a08c770adefb15c1e2c0f2dab51c624acb74b93d8d17895eea14ca49676` |
+
+这组核对证明 stack v2 的 Mesa 与 MaliBridge 二进制可以由本仓库 CI 从固定源码和补丁重建，不依赖设备 `/opt` 的实验副本。
 
 ## 6. 版本与校验
 

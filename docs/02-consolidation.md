@@ -9,7 +9,7 @@
 | `collegeming/Droidspaces-Arch-Niri-rootfs-builder` | 设备 profile、Mali 栈安装器、card0/Anland unit、偏好阶段、host 包脚本 | 构建逻辑与设备补丁混在一起；补丁更新要改 builder |
 | `collegeming/mesa-cross` | 历史 Mesa/MaliBridge CI；workflow 已迁到本仓库 | 只读保留，待新 workflow 验证后停用 |
 | `Goldzxcbug/anland` | Anland 上游 fork；niri/Smithay patch、overlay、PKGBUILD | 我们只依赖其中两个补丁，但 fork 带 HUD 等无关改动 |
-| `Goldzxcbug/droidspaces-package` | Anland/niri 包的 CI 与 Release | 包构建依赖该仓库；我们无法控制默认 tag/runner |
+| `Goldzxcbug/droidspaces-package` | Anland/niri 包的上游 CI 与 Release | 本仓库已发布自己的 `anland-niri-packages` |
 | 设备 `/opt` | 多个实验候选（Mesa、ICD、niri touch、mb-*） | 实验室状态；不是安装器布局，不能直接复刻 |
 | 本机 `.tmp` | `mali-stack`/`mali-host` 归档、补丁、源码 | 未发布；换机器会丢失 |
 | 设备 `/data/local/tmp` | host server、supervisor、Anland 别名 | 只存在于单台设备；没有安装包 |
@@ -51,7 +51,7 @@ niri 包仓库（建议 xring-o3-niri-package 或本仓库 workflow）
 | Android host 脚本 | 本仓库 `host/` | 本仓库；`xring-o3-mali-host` 由这里打包 |
 | `mali-stack` 安装器、card0/anland unit、preferences | 本仓库 `rootfs/device/xring-o3/`；builder 按固定 commit 拉取 | 本仓库 |
 | rootfs 镜像构建 | builder | builder |
-| niri 包构建/发布 | Goldzxcbug/droidspaces-package | 建议新建 `xring-o3-niri-package` 或本仓库 workflow |
+| niri 包构建/发布 | Goldzxcbug/droidspaces-package | 本仓库已发布 `anland-niri-packages` |
 
 ## 4. 跨发行版复用
 
