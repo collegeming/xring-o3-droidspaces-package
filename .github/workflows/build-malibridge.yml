@@ -7,8 +7,10 @@
 #                            built as libvkb_wl_gone.so
 #   server                   patches/malibridge/malibridge-mem-budget-patch.py,
 #                            then patches/malibridge/malibridge-afbc-export-metadata-patch.py
-#                            (the port of ASEbrahim/MaliBridge e7ee6be), cross-built
-#                            for Android arm64-v8a with NDK r27c
+#                            (the port of ASEbrahim/MaliBridge e7ee6be), then
+#                            patches/malibridge/0001-control-socket.patch (the
+#                            budget control socket the host scripts wait for),
+#                            cross-built for Android arm64-v8a with NDK r27c
 #   host-assets              scripts/make-host-bundle.sh and ksu-module/build-module.sh
 #                            over that server: xring-o3-mali-host-<V>.tar.zst and
 #                            xring-o3-mali-host-ksu-<V>.zip, with .sha256 sidecars
@@ -42,7 +44,7 @@ on:
         type: boolean
         default: true
       server:
-        description: 'build the Android arm64-v8a server (mem-budget + AFBC export metadata)'
+        description: 'build the Android arm64-v8a server (mem-budget + AFBC export metadata + control socket)'
         type: boolean
         default: true
       publish:
@@ -57,7 +59,7 @@ env:
   MB_REPO: https://github.com/ASEbrahim/MaliBridge.git
   MB_REVISION: 47ec18eaa9d9f83c359d56ba412a17d61ba59a66
   VULKAN_HEADERS_TREE: 5cc90b8046cbfbd4638e0c2d0397938dab41a4ce
-  HOST_BUNDLE_VERSION: 2026.11.08-2
+  HOST_BUNDLE_VERSION: 2026.11.08-3
 
 jobs:
   client:
@@ -276,6 +278,10 @@ jobs:
             | tee stage/build-info/patch-preflight.txt
           python3 -I patches/malibridge/malibridge-afbc-export-metadata-patch.py --check malibridge \
             | tee -a stage/build-info/patch-preflight.txt
+          # The control socket is a separate diff on top of both patches, so it is
+          # not in the pinned baseline; the two --check runs above already pin the
+          # exact tree it applies to.
+          test ! -e malibridge/server/server_control.c
 
       - name: Apply the server patch chain
         run: |
@@ -286,8 +292,19 @@ jobs:
           python3 -I patches/malibridge/malibridge-afbc-export-metadata-patch.py malibridge \
             | tee -a stage/build-info/patch-applied.txt
           python3 -I patches/malibridge/malibridge-afbc-export-metadata-patch.py --verify-candidate malibridge
-          # The AFBC patch adds two files; intent-to-add puts them in the records below.
-          git -C malibridge add -N server/server_dmabuf_meta.c server/server_dmabuf_meta.h
+          # The control socket patch is a diff, not a script. Its pre-state is the
+          # mem-budget + AFBC tree verified immediately above.
+          git -C malibridge apply --check "$PWD/patches/malibridge/0001-control-socket.patch"
+          git -C malibridge apply "$PWD/patches/malibridge/0001-control-socket.patch"
+          test "$(git -C malibridge hash-object server/server_control.c)" = c632d8b5e56539be5741a523a7cf5724e2f92adb
+          test "$(git -C malibridge hash-object server/server_main.c)" = 183cd19b608d4247652de1dfdb3422a9ac97d40d
+          test "$(git -C malibridge hash-object server/server_memory.c)" = ceb05e31afb741a775e1c6fa537987bcc278f32a
+          test "$(git -C malibridge hash-object server/vkb_server.h)" = 25d7a926f9a0234310ffea46a6cc9daff3fbcdac
+          echo "control socket patch applied" | tee -a stage/build-info/patch-applied.txt
+          # The AFBC patch adds two files and the control patch one; intent-to-add
+          # puts them in the records below.
+          git -C malibridge add -N server/server_dmabuf_meta.c server/server_dmabuf_meta.h \
+            server/server_control.c
           git -C malibridge diff --check
           git -C malibridge diff > stage/build-info/candidate.patch
           test -s stage/build-info/candidate.patch
@@ -329,6 +346,12 @@ jobs:
             > stage/build-info/floor-marker.txt
           strings stage/vkbridge-server | grep -F "dma-buf export's; made at modifier" \
             > stage/build-info/afbc-marker.txt
+          # The host scripts wait for control.sock; a server without this marker
+          # starts mali.sock alone and start-bridge.sh declares failure.
+          strings stage/vkbridge-server | grep -F 'control: listening on %s' \
+            > stage/build-info/control-marker.txt
+          strings stage/vkbridge-server | grep -F 'budget set by uid' \
+            >> stage/build-info/control-marker.txt
           nm stage/vkbridge-server | awk '{print $2, $3}' | sort > stage/build-info/exports.txt
           sha256sum stage/vkbridge-server > stage/build-info/server-SHA256SUMS
           git -C malibridge rev-parse HEAD > stage/build-info/source-revision.txt
@@ -338,7 +361,8 @@ jobs:
             > stage/build-info/source-blobs.txt
           dpkg-query -W > stage/build-info/build-packages.txt
           cp patches/malibridge/malibridge-mem-budget-patch.py \
-             patches/malibridge/malibridge-afbc-export-metadata-patch.py stage/build-info/
+             patches/malibridge/malibridge-afbc-export-metadata-patch.py \
+             patches/malibridge/0001-control-socket.patch stage/build-info/
           rm -f malibridge-server-aarch64.tar.zst SHA256SUMS
           tar --zstd -cf malibridge-server-aarch64.tar.zst -C stage .
           sha256sum malibridge-server-aarch64.tar.zst > SHA256SUMS

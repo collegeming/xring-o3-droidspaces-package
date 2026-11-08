@@ -9,6 +9,7 @@
 | `mesa/mesa-kopper-retire-patch.py` | 同上 | 同上 | 按脚本头部说明运行 |
 | `malibridge/malibridge-*.py` | `ASEbrahim/MaliBridge` | 各脚本头部记录的 commit | 按脚本头部说明运行 |
 | `malibridge/afbc/0001-afbc-export-metadata.patch` | `ASEbrahim/MaliBridge` | `3cd7a2b` | `git am` 或 `git apply` |
+| `malibridge/0001-control-socket.patch` | `ASEbrahim/MaliBridge` | `47ec18e` + mem-budget + AFBC | `git apply`，必须最后应用 |
 
 ## Anland / Smithay
 
@@ -34,7 +35,8 @@ git -C anland apply patches/smithay/0001-afbc-linear-size-check.patch
 
 ## MaliBridge
 
-- `malibridge-mem-budget-patch.py`：服务端内存预算与 control socket。
+- `malibridge-mem-budget-patch.py`：服务端内存预算。
+- `malibridge/0001-control-socket.patch`：预算 control socket（`control.sock`，`mbctl`/`mb-tray` 使用）；在 mem-budget 与 AFBC 之后应用。
 - `malibridge-wsi-lifecycle-patch.py`：Wayland WSI 生命周期。
 - `malibridge-wl-gone-patch.py`：wl_surface 销毁补偿，配合 `malibridge-wl-gone-shim.c`。
 - `malibridge-format-capacity-patch.py`：dmabuf 格式容量 256 → 2048。
