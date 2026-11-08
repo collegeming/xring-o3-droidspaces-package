@@ -6,7 +6,13 @@
 #                            plus patches/malibridge/malibridge-wl-gone-shim.c
 #                            built as libvkb_wl_gone.so
 #   server                   patches/malibridge/malibridge-mem-budget-patch.py,
-#                            cross-built for Android arm64-v8a with NDK r27c
+#                            then patches/malibridge/malibridge-afbc-export-metadata-patch.py
+#                            (the port of ASEbrahim/MaliBridge e7ee6be), cross-built
+#                            for Android arm64-v8a with NDK r27c
+#   host-assets              scripts/make-host-bundle.sh and ksu-module/build-module.sh
+#                            over that server: xring-o3-mali-host-<V>.tar.zst and
+#                            xring-o3-mali-host-ksu-<V>.zip, with .sha256 sidecars
+#   publish                  (workflow_dispatch input publish) that release tag
 #
 # Every job checks the pinned upstream commit and the exact patch pre-state
 # before building, and verifies the post-state after. Artifacts hold the archive
@@ -22,6 +28,10 @@
 #
 # The server is built on an x86_64 runner because the NDK's host tools are
 # x86_64; the client is a native AArch64 Linux build on an arm runner.
+#
+# The host bundle and the KernelSU module are built from the server artifact of
+# this run, never from a binary copied in by hand. Publishing is a separate,
+# explicit decision: the build jobs only upload artifacts.
 name: build malibridge
 
 on:
@@ -32,9 +42,13 @@ on:
         type: boolean
         default: true
       server:
-        description: 'build the Android arm64-v8a server (mem-budget)'
+        description: 'build the Android arm64-v8a server (mem-budget + AFBC export metadata)'
         type: boolean
         default: true
+      publish:
+        description: 'publish the host bundle and KernelSU module as a release'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -43,6 +57,7 @@ env:
   MB_REPO: https://github.com/ASEbrahim/MaliBridge.git
   MB_REVISION: 47ec18eaa9d9f83c359d56ba412a17d61ba59a66
   VULKAN_HEADERS_TREE: 5cc90b8046cbfbd4638e0c2d0397938dab41a4ce
+  HOST_BUNDLE_VERSION: 2026.11.08-2
 
 jobs:
   client:
@@ -259,13 +274,20 @@ jobs:
           test -f malibridge/common/gen/vkb_gen_server.c
           python3 -I patches/malibridge/malibridge-mem-budget-patch.py --check malibridge \
             | tee stage/build-info/patch-preflight.txt
+          python3 -I patches/malibridge/malibridge-afbc-export-metadata-patch.py --check malibridge \
+            | tee -a stage/build-info/patch-preflight.txt
 
-      - name: Apply the server patch
+      - name: Apply the server patch chain
         run: |
           set -euo pipefail
           python3 -I patches/malibridge/malibridge-mem-budget-patch.py malibridge \
             | tee stage/build-info/patch-applied.txt
           python3 -I patches/malibridge/malibridge-mem-budget-patch.py --verify-candidate malibridge
+          python3 -I patches/malibridge/malibridge-afbc-export-metadata-patch.py malibridge \
+            | tee -a stage/build-info/patch-applied.txt
+          python3 -I patches/malibridge/malibridge-afbc-export-metadata-patch.py --verify-candidate malibridge
+          # The AFBC patch adds two files; intent-to-add puts them in the records below.
+          git -C malibridge add -N server/server_dmabuf_meta.c server/server_dmabuf_meta.h
           git -C malibridge diff --check
           git -C malibridge diff > stage/build-info/candidate.patch
           test -s stage/build-info/candidate.patch
@@ -305,13 +327,18 @@ jobs:
             > stage/build-info/budget-marker.txt
           strings stage/vkbridge-server | grep -F 'MemAvailable is under the floor' \
             > stage/build-info/floor-marker.txt
+          strings stage/vkbridge-server | grep -F "dma-buf export's; made at modifier" \
+            > stage/build-info/afbc-marker.txt
+          nm stage/vkbridge-server | awk '{print $2, $3}' | sort > stage/build-info/exports.txt
           sha256sum stage/vkbridge-server > stage/build-info/server-SHA256SUMS
           git -C malibridge rev-parse HEAD > stage/build-info/source-revision.txt
           git -C malibridge ls-tree HEAD server/server_memory.c server/server_instance.c \
-            server/server_main.c server/vkb_server.h common/gen/vkb_gen_server.c \
-            third_party/Vulkan-Headers-1.4.341 > stage/build-info/source-blobs.txt
+            server/server_main.c server/server_emu_layer.c server/vkb_server.h \
+            common/gen/vkb_gen_server.c third_party/Vulkan-Headers-1.4.341 \
+            > stage/build-info/source-blobs.txt
           dpkg-query -W > stage/build-info/build-packages.txt
-          cp patches/malibridge/malibridge-mem-budget-patch.py stage/build-info/
+          cp patches/malibridge/malibridge-mem-budget-patch.py \
+             patches/malibridge/malibridge-afbc-export-metadata-patch.py stage/build-info/
           rm -f malibridge-server-aarch64.tar.zst SHA256SUMS
           tar --zstd -cf malibridge-server-aarch64.tar.zst -C stage .
           sha256sum malibridge-server-aarch64.tar.zst > SHA256SUMS
@@ -335,3 +362,127 @@ jobs:
             stage/build-info/
             mb-build/CMakeFiles/CMakeConfigureLog.yaml
             mb-build/CMakeCache.txt
+
+  host-assets:
+    name: host bundle and KernelSU module
+    needs: server
+    if: ${{ inputs.server }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the kit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install packaging dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils ca-certificates python3 zstd
+
+      - name: Download the server artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: malibridge-server-aarch64
+          path: server-artifact
+
+      - name: Unpack the server and record its SHA-256
+        run: |
+          set -euo pipefail
+          (cd server-artifact && sha256sum -c SHA256SUMS)
+          mkdir -p server-tree dist
+          tar --zstd -xf server-artifact/malibridge-server-aarch64.tar.zst -C server-tree
+          # The server job tars `-C stage .`: the artifact root is the stage dir.
+          server=
+          for candidate in server-tree/vkbridge-server server-tree/stage/vkbridge-server; do
+            if [ -f "$candidate" ]; then
+              server=$candidate
+              break
+            fi
+          done
+          test -n "$server" || { echo "::error::the server artifact holds no vkbridge-server"; exit 1; }
+          readelf -h "$server" | grep 'Machine:.*AArch64'
+          printf '%s  vkbridge-server\n' "$(sha256sum "$server" | awk '{print $1}')" \
+            > "dist/xring-o3-mali-host-$HOST_BUNDLE_VERSION.server.sha256"
+          cat "dist/xring-o3-mali-host-$HOST_BUNDLE_VERSION.server.sha256"
+          echo "SERVER=$PWD/$server" >> "$GITHUB_ENV"
+
+      - name: Build the host bundle and the KernelSU module
+        run: |
+          set -euo pipefail
+          # Both scripts refuse a server that is not a bionic AArch64 executable.
+          bash scripts/make-host-bundle.sh --server "$SERVER" \
+            --version "$HOST_BUNDLE_VERSION" --out dist
+          bash ksu-module/build-module.sh --server "$SERVER" \
+            --version "$HOST_BUNDLE_VERSION" --out dist
+          ls -l dist
+
+      - name: Upload the host assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: xring-o3-mali-host-assets
+          path: dist/
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: host-assets-build-logs
+          path: |
+            dist/
+            server-artifact/
+
+  publish:
+    name: publish release
+    needs: [server, host-assets]
+    if: ${{ inputs.publish && inputs.server }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the kit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download the host assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: xring-o3-mali-host-assets
+          path: dist
+
+      - name: Verify the assets
+        run: |
+          set -euo pipefail
+          # Each sidecar names its archive by basename, so check from inside dist.
+          # The server manifest names vkbridge-server, which is not a release asset.
+          (cd dist && sha256sum -c ./*.tar.zst.sha256 ./*.zip.sha256)
+          sha256sum dist/*.tar.zst dist/*.zip
+          ls -l dist
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="xring-o3-mali-host-$HOST_BUNDLE_VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag exists: updating its assets"
+          else
+            {
+              printf 'MaliBridge server for the XRING-O3 Mali stack, built from ASEbrahim/MaliBridge %s\n' "$MB_REVISION"
+              printf 'with patches/malibridge/malibridge-mem-budget-patch.py and\n'
+              printf 'patches/malibridge/malibridge-afbc-export-metadata-patch.py (upstream e7ee6be).\n\n'
+              printf 'Assets: the Android bionic AArch64 vkbridge-server SHA-256 manifest, the host bundle\n'
+              printf 'xring-o3-mali-host-%s.tar.zst and the KernelSU module\n' "$HOST_BUNDLE_VERSION"
+              printf 'xring-o3-mali-host-ksu-%s.zip, each with a .sha256 sidecar.\n' "$HOST_BUNDLE_VERSION"
+            } > notes.md
+            gh release create "$tag" --title "XRING-O3 Mali host $HOST_BUNDLE_VERSION" --notes-file notes.md
+          fi
+          gh release upload "$tag" --clobber dist/*
+          gh release view "$tag" --json assets --jq '.assets[].name'
