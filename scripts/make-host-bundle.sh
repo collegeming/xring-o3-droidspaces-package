@@ -27,7 +27,8 @@ export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL='*'
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-readonly HOST_DIR="$SCRIPT_DIR/host"
+readonly REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+readonly HOST_DIR="$REPO_DIR/host"
 readonly DEFAULT_DEVICE_SERVER=/data/local/tmp/mbsrv/vkbridge-server
 readonly ZSTD_LEVEL="${ZSTD_LEVEL:-10}"
 

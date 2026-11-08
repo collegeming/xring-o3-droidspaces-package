@@ -9,7 +9,12 @@
 # compression level, and text files are normalized to LF (Android sh cannot
 # parse CRLF).
 #
-# Usage: build-module.sh --server PATH [--out DIR] [--force]
+# Usage: build-module.sh --server PATH [--version V] [--out DIR] [--force]
+#
+# --version names the archive and the packaged module.prop. Its date part must
+# be YYYY.MM.DD; a "-N" suffix (a second build of the same day) raises
+# versionCode so a module manager orders it after the plain date. Without it
+# the archive takes module.prop's version.
 
 set -euo pipefail
 
@@ -20,6 +25,7 @@ HOST_DIR=$REPO_DIR/host
 ZIP_PREFIX=xring-o3-mali-host-ksu
 
 SERVER_PATH=""
+VERSION_OVERRIDE=""
 OUT_DIR=$REPO_DIR/dist
 FORCE=false
 
@@ -28,9 +34,10 @@ die() { printf '[build-module] 错误: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-用法: build-module.sh --server PATH [--out DIR] [--force]
+用法: build-module.sh --server PATH [--version V] [--out DIR] [--force]
 
   --server PATH  vkbridge-server（AArch64 bionic 可执行文件）
+  --version V    产物版本（默认 module.prop 的 version；日期部分须为 YYYY.MM.DD）
   --out DIR      输出目录（默认 <repo>/dist）
   --force        覆盖已存在的 zip
   -h, --help     显示帮助
@@ -42,6 +49,7 @@ EOF
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --server) [ "$#" -ge 2 ] || die "--server 缺少参数"; SERVER_PATH=$2; shift 2 ;;
+        --version) [ "$#" -ge 2 ] || die "--version 缺少参数"; VERSION_OVERRIDE=$2; shift 2 ;;
         --out) [ "$#" -ge 2 ] || die "--out 缺少参数"; OUT_DIR=$2; shift 2 ;;
         --force) FORCE=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -53,11 +61,34 @@ done
 [ -f "$SERVER_PATH" ] || die "找不到 server：$SERVER_PATH"
 [ -f "$MOD_DIR/module.prop" ] || die "找不到 $MOD_DIR/module.prop"
 
-VERSION=$(sed -n 's/^version=//p' "$MOD_DIR/module.prop" | head -n 1 | tr -d '\r')
-case "$VERSION" in
+PROP_VERSION=$(sed -n 's/^version=//p' "$MOD_DIR/module.prop" | head -n 1 | tr -d '\r')
+PROP_VERSION_CODE=$(sed -n 's/^versionCode=//p' "$MOD_DIR/module.prop" | head -n 1 | tr -d '\r')
+case "$PROP_VERSION" in
     [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]) ;;
-    *) die "module.prop 的 version 不是 YYYY.MM.DD：$VERSION" ;;
+    *) die "module.prop 的 version 不是 YYYY.MM.DD：$PROP_VERSION" ;;
 esac
+
+VERSION=$PROP_VERSION
+VERSION_CODE=$PROP_VERSION_CODE
+DATE_PART=$VERSION
+if [ -n "$VERSION_OVERRIDE" ]; then
+    VERSION=$VERSION_OVERRIDE
+    DATE_PART=${VERSION%%-*}
+    case "$DATE_PART" in
+        [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]) ;;
+        *) die "版本号的日期部分不是 YYYY.MM.DD：$VERSION" ;;
+    esac
+    REVISION_PART=${VERSION#"$DATE_PART"}
+    REVISION_PART=${REVISION_PART#-}
+    if [ -n "$REVISION_PART" ]; then
+        case "$REVISION_PART" in
+            *[!0-9]*) die "版本号的后缀必须是数字：$VERSION" ;;
+        esac
+    fi
+    # 2026.11.08 -> 20261108; a "-2" suffix raises it to 2026110802 so a later
+    # build of the same day sorts after the plain date.
+    VERSION_CODE=$(( $(printf '%s' "$DATE_PART" | tr -d '.') * 100 + ${REVISION_PART:-0} ))
+fi
 
 # The server must be a bionic AArch64 executable: a glibc build cannot run on
 # Android, and the wrong architecture fails only at boot.
@@ -104,11 +135,19 @@ mkdir -p "$STAGE/payload/mbsrv"
 
 cp -f -- "$MOD_DIR/module.prop" "$MOD_DIR/customize.sh" "$MOD_DIR/service.sh" \
          "$MOD_DIR/uninstall.sh" "$MOD_DIR/README.md" "$STAGE/"
+if [ -n "$VERSION_OVERRIDE" ]; then
+    # The packaged property must name the artifact the user installs.
+    awk -v version="$VERSION" -v code="$VERSION_CODE" '
+        /^version=/ { print "version=" version; next }
+        /^versionCode=/ { print "versionCode=" code; next }
+        { print }
+    ' "$MOD_DIR/module.prop" > "$STAGE/module.prop"
+fi
 cp -f -- "$HOST_DIR"/*.sh "$HOST_DIR/host.env.example" "$STAGE/payload/"
 cp -f -- "$SERVER_PATH" "$STAGE/payload/mbsrv/vkbridge-server"
 
 log "打包 $ZIP_PREFIX-$VERSION（固定顺序、时间戳、权限；文本转 LF）"
-"$PYTHON_BIN" -I - "$STAGE" "$ARCHIVE" "$VERSION" <<'PY'
+"$PYTHON_BIN" -I - "$STAGE" "$ARCHIVE" "$DATE_PART" <<'PY'
 import hashlib
 import os
 import sys
