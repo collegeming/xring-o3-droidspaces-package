@@ -184,8 +184,8 @@ It accepts an extracted directory or an archive, and exits non-zero on the first
 failing group:
 
 ```sh
-scripts/device/xring-o3/verify-mali-stack.sh /path/to/bundle
-scripts/device/xring-o3/verify-mali-stack.sh xring-o3-mali-stack-2026.11.08-v2.tar.zst
+rootfs/device/xring-o3/verify-mali-stack.sh /path/to/bundle
+rootfs/device/xring-o3/verify-mali-stack.sh xring-o3-mali-stack-2026.11.08-v2.tar.zst
 # PASS layout=v2 files=23 checks=10
 ```
 
