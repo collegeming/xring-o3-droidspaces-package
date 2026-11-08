@@ -123,21 +123,21 @@ niri 的构建方式是把官方源码、`niri.patch` 和 Anland 后端 overlay 
 
 | 仓库/分支 | 作用 | 当前状态 |
 | --- | --- | --- |
-| `collegeming/Droidspaces-Arch-Niri-rootfs-builder` `xring-o3-mali` | rootfs 镜像构建：设备脚本按固定 commit 拉取、Mali 栈、偏好阶段 | 已推送，HEAD `bfa30f4` |
-| `collegeming/mesa-cross` | Mesa 候选与 MaliBridge 补丁的 CI | 保持现状，不在本仓库改动 |
+| `collegeming/Droidspaces-Arch-Niri-rootfs-builder` `xring-o3-mali` | rootfs 镜像构建：设备脚本按固定 commit 拉取、Mali 栈、偏好阶段 | 已推送，HEAD `95fe284` |
+| `collegeming/mesa-cross` | 历史 Mesa/MaliBridge CI；构建 workflow 已迁到本仓库 `.github/workflows/build-mesa.yml`、`build-malibridge.yml` | 只读保留，待新 workflow 验证后停用 |
 | `Goldzxcbug/droidspaces-package` | Anland/niri 预编译包的 CI 与 Release | 上游发布仓库 |
 | `Goldzxcbug/anland` | Anland 上游的 fork，当前多 2 个 HUD 提交 | 上游打包源 |
 | `SuperTurtleDev/anland` | Anland 上游主体 | 基线 |
 | `ASEbrahim/MaliBridge` | MaliBridge 上游；AFBC 修复在 PR #71 | 上游 |
 | 本仓库 | 设备补丁、主机侧脚本、打包工具、文档 | 已创建 |
 
-镜像构建阶段按 `XRING_O3_KIT_REF` 拉取本仓库；离线或 GitHub 不可达时，需要把 `XRING_O3_KIT_REPO` 指到可达镜像。当前 builder 提交 `bfa30f4` 对应 kit 快照 `c71d58e`。
+镜像构建阶段按 `XRING_O3_KIT_REF` 拉取本仓库；离线或 GitHub 不可达时，需要把 `XRING_O3_KIT_REPO` 指到可达镜像。当前 builder 提交 `95fe284` 对应 kit 快照 `c71d58e`。
 
 ## 6. 版本与校验
 
 | 对象 | 版本/校验 |
 | --- | --- |
-| rootfs builder | `xring-o3-mali` @ `bfa30f4` |
+| rootfs builder | `xring-o3-mali` @ `95fe284` |
 | Mali stack v2 | `159ddd879241df78baa2f476e38ac1756e1a9b44c778bd0b8b7c18e50389c08d` |
 | Mali host | `3def93c0b01bdf5437e9094219a00e62e1495c0da39db93ff84ac5fae31fe179` |
 | vkbridge-server | `729aa213798b29478cc12d475fc5b6eb5a2c9507c4cde6b5a7e075cc73bf480d` |
