@@ -1,0 +1,349 @@
+name: build-niri-package
+
+run-name: niri-anland Arch ARM64 (${{ inputs.anland_ref || 'legacy' }}, publish=${{ inputs.publish || false }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      anland_ref:
+        description: Anland branch, tag or commit to build
+        required: true
+        type: string
+        default: legacy
+      publish:
+        description: Publish the packages and manifest to the anland-niri-packages release
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: Rolling release tag (the installer only accepts anland-niri-packages)
+        required: true
+        type: string
+        default: anland-niri-packages
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-niri-package-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ANLAND_REPO: https://github.com/SuperTurtleDev/anland.git
+  ALLOWED_RELEASE_TAG: anland-niri-packages
+  OUTPUT_DIR: ${{ github.workspace }}/niri-package-build
+  ASSET_DIR: ${{ github.workspace }}/release-assets
+
+jobs:
+  build:
+    name: Build niri-anland + xorg-xwayland (Arch ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      archive: ${{ steps.package.outputs.archive }}
+      archive_sha256: ${{ steps.package.outputs.archive_sha256 }}
+      source_commit: ${{ steps.package.outputs.source_commit }}
+    steps:
+      - name: Checkout kit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Validate workflow inputs
+        env:
+          INPUT_ANLAND_REF: ${{ inputs.anland_ref }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$INPUT_RELEASE_TAG" != "$ALLOWED_RELEASE_TAG" ]]; then
+              echo "release_tag must be $ALLOWED_RELEASE_TAG; the installer rejects any other tag" >&2
+              exit 1
+          fi
+          if [[ ! "$INPUT_ANLAND_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._+~/-]*$ ]] || \
+             [[ "$INPUT_ANLAND_REF" == *..* ]] || [[ "$INPUT_ANLAND_REF" == *'@{'* ]]; then
+              echo "unsupported anland_ref: $INPUT_ANLAND_REF" >&2
+              exit 1
+          fi
+          revision="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ ! "$revision" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "invalid revision: $revision" >&2
+              exit 1
+          fi
+          echo "anland_ref=$INPUT_ANLAND_REF release_tag=$INPUT_RELEASE_TAG revision=$revision"
+
+      - name: Build packages in Arch ARM64 container
+        env:
+          ANLAND_REF: ${{ inputs.anland_ref }}
+          JOBS: 4
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR"
+          output_dir="$(cd -- "$OUTPUT_DIR" && pwd -P)"
+          if [[ -n "$(find "$output_dir" -mindepth 1 -print -quit)" ]]; then
+              echo "Build output must be empty: $output_dir" >&2
+              exit 1
+          fi
+
+          docker run --rm -i --platform linux/arm64 \
+            -e ANLAND_REPO -e ANLAND_REF -e JOBS \
+            -v "$output_dir:/build" \
+            -v "$GITHUB_WORKSPACE/patches:/kit-patches:ro" \
+            ogarcia/archlinux:latest bash -s <<'ANLAND_BUILD'
+          set -euo pipefail
+          [[ "$(uname -m)" == aarch64 ]] || { echo 'Native aarch64 container required' >&2; exit 1; }
+          : "${ANLAND_REPO:?ANLAND_REPO is required}"
+          : "${ANLAND_REF:?ANLAND_REF is required}"
+
+          echo '::group::Install build dependencies'
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed base-devel git ca-certificates sudo python
+          echo '::endgroup::'
+
+          useradd -m -s /bin/bash anland
+          # The recipes install build dependencies through sudo. This permission
+          # exists only inside this fresh, disposable build container.
+          printf 'anland ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/anland-ci
+          chmod 0440 /etc/sudoers.d/anland-ci
+          printf '\nPACMAN_AUTH=(sudo)\n' >> /etc/makepkg.conf
+
+          echo '::group::Clone Anland and apply kit patches'
+          git init --quiet /tmp/anland
+          git -C /tmp/anland remote add origin "$ANLAND_REPO"
+          git -C /tmp/anland config --local advice.detachedHead false
+          if git -C /tmp/anland fetch --quiet --depth=1 origin "$ANLAND_REF"; then
+              git -C /tmp/anland checkout --quiet --detach FETCH_HEAD
+          else
+              # Some servers reject fetching a bare commit; fall back to a full fetch.
+              git -C /tmp/anland fetch --quiet origin
+              git -C /tmp/anland checkout --quiet --detach "$ANLAND_REF"
+          fi
+          source_commit="$(git -C /tmp/anland rev-parse HEAD)"
+          for patch in \
+              /kit-patches/anland/0001-touch-seat.patch \
+              /kit-patches/smithay/0001-afbc-linear-size-check.patch; do
+              test -f "$patch" || { echo "missing kit patch: $patch" >&2; exit 1; }
+              git -C /tmp/anland apply --check "$patch"
+              git -C /tmp/anland apply --whitespace=nowarn "$patch"
+              # Reversing the just-applied patch proves the working tree now
+              # contains exactly its changes and that the patch was effective.
+              git -C /tmp/anland apply --check --reverse "$patch"
+          done
+          git -C /tmp/anland diff --stat
+          printf '%s\n' "$source_commit" > /build/source-commit
+          echo "Anland $ANLAND_REF resolved to $source_commit; both kit patches applied"
+          echo '::endgroup::'
+
+          echo '::group::Build niri-anland and patched xorg-xwayland'
+          mkdir -p /build/work /build/packages /build/payload
+          chown -R anland:anland /tmp/anland /build
+          recipe_dir=/tmp/anland/producers/niri/Arch_v5
+          test -f "$recipe_dir/build.sh" || {
+              echo "the selected Anland commit lacks producers/niri/Arch_v5/build.sh" >&2
+              exit 1
+          }
+          test -f "$recipe_dir/xorg-xwayland.PKGBUILD" || {
+              echo "the selected Anland commit lacks the Xwayland PKGBUILD" >&2
+              exit 1
+          }
+
+          export RECIPE_DIR="$recipe_dir" WORKDIR=/build/work ARTIFACTS=/build/packages ARTIFACTS_DIR=/build/packages
+          export ANLAND_WITH_DEPS=1 ANLAND_INSTALL=0 INSTALL=0 BUILD_XWAYLAND=1 ANLAND_STAGE=build
+          export ANLAND_WITH_DE=1 ANLAND_ENGINE_MODE=auto
+          export LANG=C.UTF-8 LC_ALL=C.UTF-8 GIT_TERMINAL_PROMPT=0
+          su -m -s /bin/bash anland -c '
+              export HOME=/home/anland
+              cd "$RECIPE_DIR"
+              bash ./build.sh --noconfirm
+          '
+          echo '::endgroup::'
+
+          echo '::group::Validate built packages'
+          mapfile -t pkgfiles < <(find /build/work/packages /build/packages \
+              -maxdepth 1 -type f -name '*.pkg.tar.*' -print 2>/dev/null | sort)
+          if (( ${#pkgfiles[@]} == 0 )); then
+              echo 'no packages were produced' >&2
+              exit 1
+          fi
+          declare -A package_by_name=()
+          niri_version=
+          for package in "${pkgfiles[@]}"; do
+              metadata="$(bsdtar -xOf "$package" .PKGINFO)"
+              bsdtar -tf "$package" >/dev/null
+              name="$(sed -n 's/^pkgname = //p' <<< "$metadata")"
+              version="$(sed -n 's/^pkgver = //p' <<< "$metadata")"
+              architecture="$(sed -n 's/^arch = //p' <<< "$metadata")"
+              if [[ -z "$name" || -z "$version" || -z "$architecture" ]]; then
+                  echo "missing package metadata: $package" >&2
+                  exit 1
+              fi
+              if [[ "$architecture" != aarch64 && "$architecture" != any ]]; then
+                  echo "wrong package architecture $architecture: $package" >&2
+                  exit 1
+              fi
+              case "$name" in
+                  niri-anland|xorg-xwayland) ;;
+                  *)
+                      echo "unexpected package: $name ($package)" >&2
+                      exit 1
+                      ;;
+              esac
+              if [[ -n "${package_by_name[$name]:-}" ]]; then
+                  cmp -s "$package" "${package_by_name[$name]}" || {
+                      echo "conflicting duplicate package: $name" >&2
+                      exit 1
+                  }
+                  continue
+              fi
+              package_by_name[$name]="$package"
+              if [[ "$name" == niri-anland ]]; then
+                  niri_version="${version#*:}"
+                  niri_version="${niri_version%-*}"
+              fi
+          done
+          for required in niri-anland xorg-xwayland; do
+              if [[ -z "${package_by_name[$required]:-}" ]]; then
+                  echo "missing package: $required" >&2
+                  exit 1
+              fi
+          done
+          if [[ ! "$niri_version" =~ ^[A-Za-z0-9.+~_-]+$ ]]; then
+              echo "invalid niri-anland version: $niri_version" >&2
+              exit 1
+          fi
+          cp -v "${package_by_name[niri-anland]}" "${package_by_name[xorg-xwayland]}" /build/payload/
+          printf '%s\n' "$niri_version" > /build/version
+          chmod -R a+rX /build/payload
+          chmod a+r /build/version /build/source-commit
+          echo "niri-anland version: $niri_version"
+          echo '::endgroup::'
+          ANLAND_BUILD
+
+          sudo chown -R "$(id -u):$(id -g)" "$output_dir"
+
+      - name: Create release archive and manifest
+        id: package
+        env:
+          ANLAND_REF: ${{ inputs.anland_ref }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          output_dir="$OUTPUT_DIR"
+          version="$(tr -d '[:space:]' < "$output_dir/version")"
+          source_commit="$(tr -d '[:space:]' < "$output_dir/source-commit")"
+          revision="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ ! "$version" =~ ^[A-Za-z0-9.+~_-]+$ ]]; then
+              echo "invalid package version: $version" >&2
+              exit 1
+          fi
+          if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "invalid source commit: $source_commit" >&2
+              exit 1
+          fi
+
+          archive_name="anland-niri-arch-${version}-aarch64.tar.gz"
+          stage_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$stage_dir"' EXIT
+          mkdir -p "$stage_dir/anland-niri-packages/arch" "$ASSET_DIR/packages"
+          cp -a "$output_dir/payload/." "$stage_dir/anland-niri-packages/arch/"
+          archive_path="$ASSET_DIR/$archive_name"
+          # Name the directory argument itself so the archive contains
+          # anland-niri-packages/arch/ and never a bare parent directory entry.
+          tar --owner=0 --group=0 --numeric-owner \
+              -C "$stage_dir" -czf "$archive_path" "anland-niri-packages/arch"
+          cp -a "$output_dir/payload/." "$ASSET_DIR/packages/"
+          archive_sha256="$(sha256sum "$archive_path" | awk '{ print $1 }')"
+
+          manifest="$ASSET_DIR/anland-niri-manifest"
+          {
+              printf 'format=1\n'
+              printf 'release_tag=%s\n' "$RELEASE_TAG"
+              printf 'revision=%s\n' "$revision"
+              printf 'generated_at=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              printf 'source_repository=%s\n' "$ANLAND_REPO"
+              printf 'source_ref=%s\n' "$ANLAND_REF"
+              printf 'source_commit=%s\n' "$source_commit"
+              printf 'arch=%s\n' "$archive_name"
+              printf 'arch_sha256=%s\n' "$archive_sha256"
+              printf 'arch_source_commit=%s\n' "$source_commit"
+          } > "$manifest"
+
+          bash .github/scripts/validate-anland-niri-release.sh "$ASSET_DIR" "$RELEASE_TAG" "$revision"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "archive=$archive_name" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$archive_sha256" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Upload packages and manifest
+        uses: actions/upload-artifact@v6
+        with:
+          name: niri-arch-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/release-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish anland-niri-packages release
+    needs: build
+    if: ${{ inputs.publish == true }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout kit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download release assets
+        uses: actions/download-artifact@v6
+        with:
+          name: niri-arch-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets
+
+      - name: Re-validate release assets
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/validate-anland-niri-release.sh \
+            release-assets "$RELEASE_TAG" "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+      - name: Create or update the rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mapfile -t release_assets < <(find release-assets -maxdepth 1 -type f \
+            \( -name 'anland-niri-manifest' -o -name 'anland-niri-arch-*-aarch64.tar.gz' \) -print | sort)
+          mapfile -t packages < <(find release-assets/packages -maxdepth 1 -type f \
+            -name '*.pkg.tar.*' -print | sort)
+          if (( ${#release_assets[@]} != 2 || ${#packages[@]} != 2 )); then
+              echo "unexpected release asset count: ${#release_assets[@]} manifest/archive, ${#packages[@]} packages" >&2
+              exit 1
+          fi
+
+          notes_file="$(mktemp)"
+          cat > "$notes_file" <<EOF
+          Anland Niri ARM64 packages for Arch Linux ARM.
+
+          - Source: ${ANLAND_REPO} @ ${GITHUB_SHA} (requested ref: ${{ inputs.anland_ref }})
+          - Revision: ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release upload "$RELEASE_TAG" "${release_assets[@]}" "${packages[@]}" \
+                  --clobber --repo "$GITHUB_REPOSITORY"
+          elif gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+              gh release create "$RELEASE_TAG" "${release_assets[@]}" "${packages[@]}" \
+                  --title 'Anland Niri ARM64 packages' --notes-file "$notes_file" \
+                  --repo "$GITHUB_REPOSITORY"
+          else
+              gh release create "$RELEASE_TAG" "${release_assets[@]}" "${packages[@]}" \
+                  --target "$GITHUB_SHA" --title 'Anland Niri ARM64 packages' \
+                  --notes-file "$notes_file" --repo "$GITHUB_REPOSITORY"
+          fi
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,url,assets \
+              --jq '{tag:.tagName,url:.url,assets:[.assets[].name]}'
