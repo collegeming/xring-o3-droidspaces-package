@@ -1,0 +1,212 @@
+# Build the Mesa candidate trees the XRING-O3 Mali stack consumes, from this
+# repository's patches. Manual only, native AArch64 runner, artifacts only.
+#
+#   dt-retire       pinned Mesa + no-DRM zink selection + patches/mesa/mesa-dt-retire-patch.py
+#   kopper-retire   pinned Mesa + no-DRM zink selection
+#                   + patches/mesa/mesa-kopper-lifecycle-patch.py   (prerequisite,
+#                     the retire patch validates the source after it)
+#                   + patches/mesa/mesa-kopper-retire-patch.py
+#
+# The candidate is the only tree that is installed: the retire patches are meant
+# to ship, the baseline is the unpatched pinned source. Each artifact holds the
+# archive plus SHA256SUMS; inside the archive:
+#
+#   candidate/usr/...   the tree as installed into DESTDIR (prefix /usr)
+#   build-info/         pin, applied diff, meson options, packages, ELF/ldd records
+#
+# Bundle mapping: extract the dt-retire candidate at mesa/candidate and the
+# kopper-retire candidate's candidate/ tree at mesa/kopper (see
+# rootfs/device/xring-o3/README.md).
+name: build mesa
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Mesa candidate tree to build'
+        type: choice
+        options:
+          - both
+          - dt-retire
+          - kopper-retire
+        default: both
+
+permissions:
+  contents: read
+
+env:
+  MESA_REPO: https://github.com/lfdevs/mesa-for-android-container.git
+  MESA_REVISION: 98f3d6229d61452cef80f8563af7c56ae599dc14
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    outputs:
+      variants: ${{ steps.matrix.outputs.variants }}
+    steps:
+      - name: Resolve the variant matrix
+        id: matrix
+        shell: bash
+        env:
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          set -euo pipefail
+          case "$VARIANT" in
+            both)
+              printf 'variants=["dt-retire","kopper-retire"]\n' >> "$GITHUB_OUTPUT"
+              ;;
+            dt-retire|kopper-retire)
+              printf 'variants=["%s"]\n' "$VARIANT" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::unknown variant: $VARIANT"
+              exit 1
+              ;;
+          esac
+
+  mesa:
+    name: mesa ${{ matrix.variant }}
+    needs: plan
+    runs-on: ubuntu-24.04-arm
+    container: ubuntu:26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.plan.outputs.variants) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the kit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install native build dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential git ca-certificates meson ninja-build pkg-config cmake \
+            python3-mako python3-yaml python3-packaging bison flex glslang-tools \
+            libdrm-dev libwayland-dev libwayland-egl-backend-dev wayland-protocols \
+            libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxdamage-dev \
+            libxshmfence-dev libxxf86vm-dev libxrandr-dev libxcb1-dev \
+            libxcb-dri3-dev libxcb-present-dev libxcb-sync-dev libxcb-randr0-dev \
+            libxcb-shm0-dev libxcb-xfixes0-dev libxcb-glx0-dev libxcb-dri2-0-dev \
+            libexpat1-dev zlib1g-dev libvulkan-dev libudev-dev libglvnd-dev \
+            libzstd-dev zstd
+
+      - name: Fetch the pinned Mesa source
+        run: |
+          set -euo pipefail
+          git init mesa
+          git -C mesa remote add origin "$MESA_REPO"
+          git -C mesa fetch --depth 1 origin "$MESA_REVISION"
+          git -C mesa checkout --detach FETCH_HEAD
+          test "$(git -C mesa rev-parse HEAD)" = "$MESA_REVISION"
+
+      - name: Configure the pinned no-DRM build
+        run: |
+          set -euo pipefail
+          meson setup mesa/build mesa --buildtype=release --prefix=/usr --libdir=lib \
+            -Dplatforms=x11,wayland -Dgallium-drivers=zink,softpipe \
+            -Dvulkan-drivers= -Dllvm=disabled -Dopengl=true -Dgles1=disabled \
+            -Dgles2=enabled -Dgbm=enabled -Dglx=dri -Degl=enabled -Dglvnd=enabled \
+            -Dgallium-va=disabled -Dbuild-tests=false
+
+      - name: Select zink before the DRM probe
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          from pathlib import Path
+          p = Path('mesa/src/egl/drivers/dri2/platform_wayland.c')
+          text = p.read_text()
+          old = 'if (!dri2_setup_device(disp, disp->Options.ForceSoftware)) {'
+          new = 'if (!dri2_setup_device(disp, disp->Options.ForceSoftware || disp->Options.Zink)) {'
+          assert text.count(old) == 1, 'dri2_setup_device anchor'
+          text = text.replace(old, new)
+          old = 'dri2_initialize_wayland(_EGLDisplay *disp)\n{\n   if (disp->Options.ForceSoftware)'
+          new = 'dri2_initialize_wayland(_EGLDisplay *disp)\n{\n   if (disp->Options.ForceSoftware || disp->Options.Zink)'
+          assert text.count(old) == 1, 'dri2_initialize_wayland anchor'
+          p.write_text(text.replace(old, new))
+          PY
+
+      - name: Apply the ${{ matrix.variant }} candidate
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          mkdir -p stage/build-info
+          case "$VARIANT" in
+            dt-retire)
+              python3 -I patches/mesa/mesa-dt-retire-patch.py mesa
+              ;;
+            kopper-retire)
+              python3 -I patches/mesa/mesa-kopper-lifecycle-patch.py mesa
+              python3 -I patches/mesa/mesa-kopper-retire-patch.py mesa
+              ;;
+            *)
+              echo "::error::unknown variant: $VARIANT"
+              exit 1
+              ;;
+          esac
+          git -C mesa diff --check
+          git -C mesa diff > "stage/build-info/mesa-$VARIANT.patch"
+          test -s "stage/build-info/mesa-$VARIANT.patch"
+
+      - name: Build and stage the candidate
+        run: |
+          set -euo pipefail
+          ninja -C mesa/build -j4
+          DESTDIR="$PWD/stage/candidate" meson install -C mesa/build
+
+      - name: Verify and package
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          lib=stage/candidate/usr/lib
+          test -f "$lib/libEGL_mesa.so.0"
+          readelf -h "$lib/libEGL_mesa.so.0" | grep 'Machine:.*AArch64'
+          find "$lib" -name 'libgallium*.so' -type f -print -quit | grep .
+          zink=$(find "$lib" -name 'zink_dri.so' -print -quit)
+          test -n "$zink"
+          ls -l "$zink" > stage/build-info/candidate-zink-dri.txt
+          readelf -d "$lib/libEGL_mesa.so.0" > stage/build-info/candidate-egl-dynamic.txt
+          ldd "$lib/libEGL_mesa.so.0" > stage/build-info/candidate-ldd.txt || true
+          if grep 'not found' stage/build-info/candidate-ldd.txt; then
+            LD_LIBRARY_PATH="$PWD/$lib" ldd "$lib/libEGL_mesa.so.0" \
+              > stage/build-info/candidate-ldd.txt
+            ! grep 'not found' stage/build-info/candidate-ldd.txt
+          fi
+          if [ "$VARIANT" = kopper-retire ]; then
+            # The lifecycle prerequisite must be in the built tree, not only in the source.
+            grep -rla 'KOPPER_LIFE OWNER_' stage/candidate/usr/lib \
+              > stage/build-info/candidate-lifecycle-marker.txt
+            test -s stage/build-info/candidate-lifecycle-marker.txt
+          fi
+          git -C mesa rev-parse HEAD > stage/build-info/source-revision.txt
+          cp mesa/build/meson-info/intro-buildoptions.json stage/build-info/
+          dpkg-query -W > stage/build-info/build-packages.txt
+          printf '%s\n' "$VARIANT" > stage/build-info/variant.txt
+          rm -f "mesa-$VARIANT-aarch64.tar.zst" SHA256SUMS
+          tar --zstd -cf "mesa-$VARIANT-aarch64.tar.zst" -C stage .
+          sha256sum "mesa-$VARIANT-aarch64.tar.zst" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload the candidate artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mesa-${{ matrix.variant }}-aarch64
+          path: |
+            mesa-${{ matrix.variant }}-aarch64.tar.zst
+            SHA256SUMS
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mesa-${{ matrix.variant }}-build-logs
+          path: mesa/build/meson-logs/
