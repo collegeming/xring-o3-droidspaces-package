@@ -14,7 +14,7 @@
 #   make-host-bundle.sh --server PATH
 #   [--version V] [--out DIR] [--mtime EPOCH] [--force]
 #
-# Output layout inside mali-host-<version>.tar.zst:
+# Output layout inside xring-o3-mali-host-<version>.tar.zst:
 #   mali-host/bin/vkbridge-server
 #   mali-host/scripts/*.sh
 #   mali-host/host.env.example
@@ -67,8 +67,8 @@ usage() {
   拒绝 glibc 版本；打包时权限固定为 0755。
 
 输出：
-  <out>/mali-host-<version>.tar.zst
-  <out>/mali-host-<version>.tar.zst.sha256
+  <out>/xring-o3-mali-host-<version>.tar.zst
+  <out>/xring-o3-mali-host-<version>.tar.zst.sha256
 EOF
 }
 
@@ -229,8 +229,8 @@ VERSION=${VERSION:-$(date -u '+%Y.%m.%d')}
 [[ "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$ ]] || \
     die "版本号无效：'$VERSION'（字母、数字、点、下划线、加号、短横线；不能以短横线开头）"
 
-ARCHIVE=$OUT_DIR/mali-host-$VERSION.tar.zst
-SUMFILE=$OUT_DIR/mali-host-$VERSION.tar.zst.sha256
+ARCHIVE=$OUT_DIR/xring-o3-mali-host-$VERSION.tar.zst
+SUMFILE=$OUT_DIR/xring-o3-mali-host-$VERSION.tar.zst.sha256
 if [[ -e "$ARCHIVE" || -e "$SUMFILE" ]] && [[ "$FORCE" != true ]]; then
     die "产物已存在：$ARCHIVE；确认覆盖时加 --force"
 fi
@@ -289,7 +289,7 @@ write_sums() {
 }
 write_sums "$ROOT"
 
-log "打包 mali-host-$VERSION（owner=0、mtime=$MTIME、level=$ZSTD_LEVEL）"
+log "打包 xring-o3-mali-host-$VERSION（owner=0、mtime=$MTIME、level=$ZSTD_LEVEL）"
 TMP_ARCHIVE=$WORK/archive.tar.zst
 (
     cd -- "$WORK"

@@ -10,8 +10,8 @@
 # existing $DEST/host.env is never overwritten.
 #
 # Two release assets complement each other:
-#   mali-stack-<version>.tar.zst  rootfs payload, installed inside the container
-#   mali-host-<version>.tar.zst   this side: vkbridge-server plus these scripts
+#   xring-o3-mali-stack-<version>.tar.zst  rootfs payload, installed inside the container
+#   xring-o3-mali-host-<version>.tar.zst   this side: vkbridge-server plus these scripts
 #
 # Usage:
 #   install-host.sh [--dest DIR] [--serial SERIAL] [--server PATH | --bundle PATH]
@@ -49,7 +49,7 @@ usage() {
   --dest DIR       安装目录（默认 /data/local/tmp/xring-o3-host）
   --serial SN      adb 设备序列号（PC 模式；默认要求只有一台设备）
   --server PATH    安装 vkbridge-server 可执行文件到 DIR/mbsrv/
-  --bundle PATH    从 mali-host-<version>.tar.zst 取 server 与脚本
+  --bundle PATH    从 xring-o3-mali-host-<version>.tar.zst 取 server 与脚本
   --uninstall      只删除本脚本安装过的文件（依据 DIR/.install-manifest）
   -h, --help       显示帮助
 
@@ -290,7 +290,7 @@ install_files() {
     elif server_present; then
         log "沿用已有 $DEST/mbsrv/$SERVER_NAME"
     else
-        log "警告：$DEST/mbsrv/$SERVER_NAME 尚不存在；用 --bundle mali-host-*.tar.zst 或 --server PATH 安装，否则 start-bridge.sh 会拒绝启动。"
+        log "警告：$DEST/mbsrv/$SERVER_NAME 尚不存在；用 --bundle xring-o3-mali-host-*.tar.zst 或 --server PATH 安装，否则 start-bridge.sh 会拒绝启动。"
     fi
 
     # The manifest records what this script installed, so --uninstall never

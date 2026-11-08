@@ -2,7 +2,7 @@
 
 本目录是小米平板 9 Pro Max（XRING-O3 / Mali-G2-Ultra-NX）Android 主机侧的全部文件。它把原先只存在于单台设备 `/data/local/tmp` 下的 bionic 服务端、supervisor、Anland socket 别名与验证脚本整理成可复制、可校验的一组脚本，使同型号设备不必再手工拼装。
 
-配套的 rootfs 侧载荷由 `scripts/device/xring-o3/README.md` 描述，以 `mali-stack-<version>.tar.zst` 发布；主机侧以 `mali-host-<version>.tar.zst` 发布。**复现一台设备需要两个包**：rootfs 包负责容器内的 Mesa/ICD/zc-run/mbctl，主机包负责本目录与 `vkbridge-server`。
+配套的 rootfs 侧载荷由 `scripts/device/xring-o3/README.md` 描述，以 `xring-o3-xring-o3-mali-stack-<version>.tar.zst` 发布；主机侧以 `xring-o3-xring-o3-mali-host-<version>.tar.zst` 发布。**复现一台设备需要两个包**：rootfs 包负责容器内的 Mesa/ICD/zc-run/mbctl，主机包负责本目录与 `vkbridge-server`。
 
 ## 主机与 rootfs 的边界
 
@@ -13,7 +13,7 @@
 | Anland socket 稳定别名 | Android 主机 `$ANLAND_LINK` | 容器看不到宿主 `/data/local/Droidspaces/Net/` |
 | 容器 `/run/display.sock` | Droidspaces 绑定挂载 | 由宿主编排，rootfs 内只能检查不能创建 |
 | `/dev/dri/card0` | 容器内 oneshot（`card0.sh`） | XRING-O3 只暴露主节点，容器需 `CAP_MKNOD` 自建 |
-| Mesa / ICD / libgbm / zc-run / mbctl | 容器 `/opt/mali-stack/current` | 属于 `mali-stack-*` bundle，不随本目录发布 |
+| Mesa / ICD / libgbm / zc-run / mbctl | 容器 `/opt/mali-stack/current` | 属于 `xring-o3-mali-stack-*` bundle，不随本目录发布 |
 
 ## 文件清单
 
@@ -60,7 +60,7 @@
 ```sh
 # 1. 把主机包解压到设备（install-host.sh 在 PC 上解压，再把文件推入设备）
 bash host/install-host.sh \
-     --bundle dist/mali-host-2026.11.08.tar.zst
+     --bundle dist/xring-o3-mali-host-2026.11.08.tar.zst
 
 # 2. 已有 vkbridge-server 时也可以只传二进制
 bash host/install-host.sh \
@@ -93,7 +93,7 @@ bash host/install-host.sh --uninstall
 
 ### rootfs 侧
 
-容器内安装 `mali-stack-<version>.tar.zst`，命令见 `scripts/device/xring-o3/README.md`。该包提供 Mesa、`libvulkan_droidbridge.so`、ICD、libgbm、libdrmfake、`zc-run`、`mbctl`、`mb-tray` 与 `budget.conf` 模板。
+容器内安装 `xring-o3-xring-o3-mali-stack-<version>.tar.zst`，命令见 `scripts/device/xring-o3/README.md`。该包提供 Mesa、`libvulkan_droidbridge.so`、ICD、libgbm、libdrmfake、`zc-run`、`mbctl`、`mb-tray` 与 `budget.conf` 模板。
 
 ## Anland 别名与绑定挂载
 
@@ -159,8 +159,8 @@ adb shell su -c '/data/local/tmp/xring-o3-host/verify-host.sh'
 1. 解锁开发者选项与 USB 调试，安装 KernelSU 并取得 root；锁定 bootloader 不影响本流程。
 2. 安装 Droidspaces APK 7.1.0，创建容器 `archniri`，rootfs 目录为 `/data/local/Droidspaces/Containers/archniri/rootfs`，启用硬件访问（`CAP_MKNOD`）。
 3. 安装 Anland 侧 APK 并启动一次，确认 `/data/local/Droidspaces/Net/anland-*.sock` 出现。
-4. 把 `mali-stack-<version>.tar.zst` 放到宿主可读位置，复制到 `$ROOTFS/root/`，在容器内按 `scripts/device/xring-o3/README.md` 运行 `install-mali-stack.sh`。
-5. PC 上运行 `install-host.sh --bundle mali-host-<version>.tar.zst`；设备侧执行时改用 `--server`。
+4. 把 `xring-o3-xring-o3-mali-stack-<version>.tar.zst` 放到宿主可读位置，复制到 `$ROOTFS/root/`，在容器内按 `scripts/device/xring-o3/README.md` 运行 `install-mali-stack.sh`。
+5. PC 上运行 `install-host.sh --bundle xring-o3-xring-o3-mali-host-<version>.tar.zst`；设备侧执行时改用 `--server`。
 6. `anland-link.sh` 创建或刷新 `$ANLAND_LINK`。
 7. 在 Droidspaces 里为容器添加绑定挂载 `$ANLAND_LINK` → `/run/display.sock`，然后启动容器。
 8. `start-bridge.sh` 启动 server。
@@ -171,7 +171,7 @@ adb shell su -c '/data/local/tmp/xring-o3-host/verify-host.sh'
 
 ```sh
 # rootfs 包：staging 目录布局见 scripts/device/xring-o3/README.md
-bash scripts/device/xring-o3/make-mali-stack-bundle.sh \
+bash scripts/make-mali-stack-bundle.sh \
      --dir /path/to/staging --version 2026.11.08 --out dist
 
 # 主机包：直接从设备读取 vkbridge-server 与设备属性

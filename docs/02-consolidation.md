@@ -48,8 +48,8 @@ niri 包仓库（建议 xring-o3-niri-package 或本仓库 workflow）
 | Mesa dt-retire/kopper-retire 补丁脚本 | 本仓库 `patches/mesa/` | 本仓库 |
 | MaliBridge 服务端/客户端补丁 | 本仓库 `patches/malibridge/` | 本仓库 |
 | libgbm shim / libdrmfake / mbctl / mb-tray / zc-run 源码 | 本仓库 `src/` | 本仓库 |
-| Android host 脚本 | 本仓库 `host/` | 本仓库；`mali-host` 由这里打包 |
-| `mali-stack` 安装器、card0/anland unit、preferences | builder `scripts/device/xring-o3/` | 短期保留在 builder；长期由本仓库提供，builder 引用固定 commit |
+| Android host 脚本 | 本仓库 `host/` | 本仓库；`xring-o3-mali-host` 由这里打包 |
+| `mali-stack` 安装器、card0/anland unit、preferences | 本仓库 `rootfs/device/xring-o3/`；builder 按固定 commit 拉取 | 本仓库 |
 | rootfs 镜像构建 | builder | builder |
 | niri 包构建/发布 | Goldzxcbug/droidspaces-package | 建议新建 `xring-o3-niri-package` 或本仓库 workflow |
 
@@ -88,8 +88,8 @@ niri 包仓库（建议 xring-o3-niri-package 或本仓库 workflow）
 
 | 发布物 | 内容 | 消费方 |
 | --- | --- | --- |
-| `mali-stack-<ver>.tar.zst` | 容器侧 Mesa/ICD/shim/工具/budget | rootfs 镜像构建 |
-| `mali-host-<ver>.tar.zst` | Android 主机侧 server/脚本 | 设备安装 |
+| `xring-o3-mali-stack-<ver>.tar.zst` | 容器侧 Mesa/ICD/shim/工具/budget | rootfs 镜像构建 |
+| `xring-o3-mali-host-<ver>.tar.zst` | Android 主机侧 server/脚本 | 设备安装 |
 | `anland-niri-packages` | niri-anland 包 + xorg-xwayland + manifest | rootfs 镜像构建 |
 | rootfs 镜像 | Arch + niri + Noctalia | 设备导入 |
 
@@ -127,7 +127,7 @@ MALI_STACK_VKBRIDGE_PATCHES=
 | --- | --- | --- |
 | P0 | 在本仓库发布 `mali-stack` 与 `mali-host` | 复刻不再依赖本机 `.tmp` |
 | P0 | 用本仓库 workflow 构建带 Touch/AFBC 的 niri 包 | 触摸与 Zen 零拷贝进入镜像 |
-| P1 | 把 builder 的 `scripts/device/xring-o3/` 在本仓库建立镜像副本，builder 引用固定 commit | 设备脚本只有一个 review 入口 |
+| P1 | 设备脚本已迁移到本仓库 `rootfs/device/xring-o3/`，builder 按固定 commit 拉取 | 设备脚本只有一个 review 入口 |
 | P1 | 增加 `bootstrap` 主机侧脚本 | 减少手工步骤 |
 | P2 | 把 `mb-tray` 改为静态或自带依赖 | 跨发行版可用 |
 | P2 | 设备 profile 从 `xring-o3` 泛化为 `mali-device` 文件 | 其他 Mali 设备复用 |

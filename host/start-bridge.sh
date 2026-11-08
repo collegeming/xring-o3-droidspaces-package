@@ -94,7 +94,7 @@ esac
 
 [ "$(id -u)" = 0 ] || die "需要 root；用 su -c '$0' 运行。"
 [ -f "$SUPERVISOR" ] || die "缺少 $SUPERVISOR；先运行 install-host.sh。"
-[ -x "$SERVER" ] || die "缺少可执行文件 $SERVER；用 install-host.sh --server/--bundle 安装 mali-host-*.tar.zst。"
+[ -x "$SERVER" ] || die "缺少可执行文件 $SERVER；用 install-host.sh --server/--bundle 安装 xring-o3-mali-host-*.tar.zst。"
 [ -c /dev/mali0 ] || die "缺少 /dev/mali0；vendor Mali 驱动未就绪，server 无法工作。"
 
 if [ -f "$SRV/server.pid" ] && is_server_pid "$(cat "$SRV/server.pid" 2>/dev/null)"; then

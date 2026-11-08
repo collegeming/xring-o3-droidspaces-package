@@ -20,11 +20,11 @@
 
 ```sh
 # 解包
-tar --zstd -xf mali-host-2026.11.08.tar.zst
+tar --zstd -xf xring-o3-mali-host-2026.11.08.tar.zst
 
 # PC 通过 adb 安装（多设备时加 --serial）
 bash mali-host/scripts/install-host.sh \
-     --bundle mali-host-2026.11.08.tar.zst \
+     --bundle xring-o3-mali-host-2026.11.08.tar.zst \
      --serial 0308A880499C3540
 ```
 
@@ -75,7 +75,7 @@ budget.conf   4096 / 2048 / 2048 / 60000
 | `display_backend` | `anland-wayland` |
 | `device_profile` | `xring-o3` |
 | `apply_preferences` | `true` |
-| `mali_stack_bundle_url` | `mali-stack-2026.11.08-v2.tar.zst` 的下载地址 |
+| `mali_stack_bundle_url` | `xring-o3-mali-stack-2026.11.08-v2.tar.zst` 的下载地址 |
 | `mali_stack_bundle_sha256` | `159ddd879241df78baa2f476e38ac1756e1a9b44c778bd0b8b7c18e50389c08d` |
 | `mali_stack_version` | `2026.11.08` |
 | `wayland_package_repository` | 带 Touch/AFBC 的 niri 包仓库；未构建时留空，使用上游包 |

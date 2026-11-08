@@ -66,13 +66,13 @@ flowchart LR
 
 `vkbridge-server` 的 SHA-256：`729aa213798b29478cc12d475fc5b6eb5a2c9507c4cde6b5a7e075cc73bf480d`。
 
-`mali-host-2026.11.08.tar.zst`：3,690,365 B，SHA-256 `3def93c0b01bdf5437e9094219a00e62e1495c0da39db93ff84ac5fae31fe179`，包含 `bin/vkbridge-server`、6 个脚本、`host.env.example`、`manifest.env`、`SHA256SUMS`。
+`xring-o3-mali-host-2026.11.08.tar.zst`：3,690,365 B，SHA-256 `3def93c0b01bdf5437e9094219a00e62e1495c0da39db93ff84ac5fae31fe179`，包含 `bin/vkbridge-server`、6 个脚本、`host.env.example`、`manifest.env`、`SHA256SUMS`。
 
 ## 4. 容器侧组件
 
 ### 4.1 Mali stack v2
 
-`mali-stack-2026.11.08-v2.tar.zst`：10,221,520 B，SHA-256 `159ddd879241df78baa2f476e38ac1756e1a9b44c778bd0b8b7c18e50389c08d`，23 个文件，13 个 ELF 均为 AArch64。
+`xring-o3-mali-stack-2026.11.08-v2.tar.zst`：10,221,520 B，SHA-256 `159ddd879241df78baa2f476e38ac1756e1a9b44c778bd0b8b7c18e50389c08d`，23 个文件，13 个 ELF 均为 AArch64。
 
 | 组 | 文件 | 用途 |
 | --- | --- | --- |
@@ -104,7 +104,7 @@ flowchart LR
 | `session-gpu-env.sh` | niri 会话级 kopper + format 环境 |
 | `noctalia-dt.template` | Noctalia 的 dt-retire + hook2 + shim 包装器模板 |
 
-这些脚本的源码在 rootfs builder 的 `scripts/device/xring-o3/`。
+这些脚本的源码在本仓库 `rootfs/device/xring-o3/`。rootfs builder 在镜像构建时按固定 commit 拉取本仓库，并复制到 `/usr/local/lib/droidspaces/device/xring-o3/`。
 
 ### 4.3 niri 与 Noctalia
 

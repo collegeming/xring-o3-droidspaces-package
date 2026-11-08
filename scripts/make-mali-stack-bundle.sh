@@ -33,7 +33,7 @@ usage() {
 
   --dir STAGE      已按 scripts/device/xring-o3/README.md 摆好的 staging 目录
   --version V      版本号；缺省时读 STAGE/manifest.env 的 MALI_STACK_VERSION
-  --name NAME      输出文件名（不含扩展名；默认 mali-stack-<version>）
+  --name NAME      输出文件名（不含扩展名；默认 xring-o3-mali-stack-<version>）
   --out DIR        输出目录（默认当前目录）
   --mtime EPOCH    tar 内所有条目的固定 mtime（默认 SOURCE_DATE_EPOCH，否则 0）
   --write-sums     先按排序结果重写 STAGE/SHA256SUMS，再校验
@@ -244,7 +244,7 @@ check_sums_coverage
 check_elf
 resolve_version
 validate_version
-NAME=${NAME:-mali-stack-$VERSION}
+NAME=${NAME:-xring-o3-mali-stack-$VERSION}
 [[ "$NAME" =~ ^[0-9A-Za-z._+-]+$ ]] || die "输出名只能包含字母、数字、点、下划线、加号、短横线：$NAME"
 
 ARCHIVE=$OUT_DIR/$NAME.tar.zst

@@ -8,8 +8,8 @@
 
 | 资产 | 作用 | 当前状态 |
 | --- | --- | --- |
-| `mali-host-<version>.tar.zst` | Android 主机侧：`vkbridge-server`、supervisor、启动/停止、Anland 别名、验证脚本 | 本地已生成并校验，未发布 |
-| `mali-stack-<version>.tar.zst` | 容器侧：Mesa、MaliBridge ICD、wl-gone shim、libgbm、libdrmfake、zc-run、mbctl、mb-tray、budget.conf | 本地 v2 已生成并校验，未发布 |
+| `xring-o3-mali-host-<version>.tar.zst` | Android 主机侧：`vkbridge-server`、supervisor、启动/停止、Anland 别名、验证脚本 | 本地已生成并校验，未发布 |
+| `xring-o3-mali-stack-<version>.tar.zst` | 容器侧：Mesa、MaliBridge ICD、wl-gone shim、libgbm、libdrmfake、zc-run、mbctl、mb-tray、budget.conf | 本地 v2 已生成并校验，未发布 |
 | `niri-anland` 包 | 带 Touch seat 与 Smithay AFBC 补丁的 niri | 补丁已在本仓库；包尚未构建 |
 | rootfs 镜像 | 由 `collegeming/Droidspaces-Arch-Niri-rootfs-builder` 的 `xring-o3-mali` 分支构建 | 分支已推送，Mali 时代镜像未发布 |
 | Droidspaces 7.1.0 APK | 容器运行时 | 上游发布 |
@@ -24,6 +24,7 @@
 | `patches/mesa/` | Mesa dt-retire / kopper-retire 补丁脚本 |
 | `patches/malibridge/` | MaliBridge 服务端/客户端补丁、wl-gone shim、AFBC 导出元数据补丁 |
 | `host/` | Android 主机侧脚本（server 安装、supervisor、Anland 别名、验证） |
+| `rootfs/device/xring-o3/` | 容器侧设备脚本（安装器、profile、card0/anland、wait-for-bridge、会话环境） |
 | `src/libgbm-shim/` | 38 符号 `libgbm` 垫片源码 |
 | `src/libdrmfake/` | `libdrmfake` 源码 |
 | `src/mbctl/` | 内存预算控制 CLI 源码 |
