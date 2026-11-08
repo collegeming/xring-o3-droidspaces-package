@@ -84,12 +84,13 @@ niri 包仓库（建议 xring-o3-niri-package 或本仓库 workflow）
 
 ## 5. 打包与发布建议
 
-### 5.1 四个发布物
+### 5.1 发布物
 
 | 发布物 | 内容 | 消费方 |
 | --- | --- | --- |
 | `xring-o3-mali-stack-<ver>.tar.zst` | 容器侧 Mesa/ICD/shim/工具/budget | rootfs 镜像构建 |
 | `xring-o3-mali-host-<ver>.tar.zst` | Android 主机侧 server/脚本 | 设备安装 |
+| `xring-o3-mali-host-ksu-<ver>.zip` | host 侧的 KernelSU 模块，默认不自启 | 设备快速部署 |
 | `anland-niri-packages` | niri-anland 包 + xorg-xwayland + manifest | rootfs 镜像构建 |
 | rootfs 镜像 | Arch + niri + Noctalia | 设备导入 |
 

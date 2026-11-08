@@ -44,6 +44,20 @@ adb shell su -c 'sh /data/local/tmp/xring-o3-host/install-host.sh \
 | `/data/local/tmp/xring-o3-host/mbsrv/vkbridge-server` | bionic server |
 | `host.env` | `CTR`、`ROOTFS`、`SRV`、`ANLAND_LINK`、预算 |
 
+### 2.1 KernelSU 模块方式（可选）
+
+`xring-o3-mali-host-ksu-2026.11.08.zip` 把同样的 host 脚本与 server 打包成 KernelSU 模块，适合快速部署多台设备。
+
+- 模块安装只复制文件，不启动任何进程；
+- 默认不自启；需要开机启动时手动创建标记：
+
+```sh
+adb shell su -c 'touch /data/adb/modules/xring_o3_mali_host/autostart'
+```
+
+- 模块不安装 Droidspaces/Anland APK，也不替代 rootfs 镜像；
+- 这是用户空间 KernelSU 模块，不是内核 LKM，不修改 SELinux 或 boot 镜像。
+
 `host.env` 的默认值适用于 `archniri`；换容器名或 rootfs 路径时必须改。
 
 ## 3. 启动桥并建立 Anland 别名

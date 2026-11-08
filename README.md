@@ -24,6 +24,7 @@
 | `patches/mesa/` | Mesa dt-retire / kopper-retire 补丁脚本 |
 | `patches/malibridge/` | MaliBridge 服务端/客户端补丁、wl-gone shim、AFBC 导出元数据补丁 |
 | `host/` | Android 主机侧脚本（server 安装、supervisor、Anland 别名、验证） |
+| `ksu-module/` | KernelSU 模块源码：把 host 侧 payload 安装到设备，默认不自启 |
 | `rootfs/device/xring-o3/` | 容器侧设备脚本（安装器、profile、card0/anland、wait-for-bridge、会话环境） |
 | `src/libgbm-shim/` | 38 符号 `libgbm` 垫片源码 |
 | `src/libdrmfake/` | `libdrmfake` 源码 |
