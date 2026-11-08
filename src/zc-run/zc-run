@@ -1,0 +1,331 @@
+#!/bin/bash
+# zc-run: per-app GPU/zero-copy environment launcher.
+# Global safe env + per-toolkit injections; never installed globally.
+set -u
+PATH=${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
+export PATH
+ZC_VERSION=0.1.0
+ZC_CLASSIFY=${ZC_CLASSIFY:-/usr/local/lib/zc-run/zc-classify}
+
+usage() {
+    cat <<EOF
+usage: zc-run [--no-shim] [--print-env] [--class NAME] [--] <command> [args...]
+  --no-shim    skip per-app shims/flags (global safe env still applies)
+  --print-env  print the resolved class/env and exit
+  --class NAME force a class (chromium|webkit|gecko|flutter|qt|gtk4|x11|sdl|terminal|unknown)
+ZC_RUN_CLASS=NAME is the environment equivalent of --class.
+ZC_RUN_DISABLE=1 execs the command untouched.
+Already-wrapped entries (zc-run/dbx-dmabuf/noctalia-dt/gpu-app-bridge/
+google-chrome wrapper or its delegator) and unknown classes exec untouched.
+EOF
+}
+
+# Env present before config files wins over config.
+declare -A ENV0=()
+while IFS='=' read -r k _; do [ -n "$k" ] && ENV0[$k]=1; done < <(env)
+
+load_conf() {
+    [ -n "${1:-}" ] && [ -f "$1" ] || return 0
+    local k v
+    while IFS='=' read -r k v || [ -n "$k" ]; do
+        case "$k" in ''|\#*) continue ;; esac
+        [[ $k =~ ^ZC_[A-Z0-9_]+$ ]] || continue
+        [ -n "${ENV0[$k]:-}" ] && continue
+        printf -v "$k" '%s' "$v"
+        export "${k?}"
+    done < "$1"
+}
+
+# Release pin first, then site config (site wins unless the caller exported it).
+load_conf "${ZC_PREFIX:-/opt/zc/current}/conf/zc-env.conf"
+load_conf "${ZC_DESKTOP_CONF:-/etc/zc-desktop.conf}"
+
+: "${ZC_MESA_DIR:=/opt/mesa-kopper-retire-42194036783}"
+: "${ZC_EGL_VENDOR_JSON:=$ZC_MESA_DIR/default-egl-vendor.json}"
+: "${ZC_ICD:=/opt/mb-format-42268762436/candidate/share/vulkan/icd.d/droidbridge_icd.json}"
+: "${ZC_BRIDGE_SOCKET:=/opt/mb-sock/mali.sock}"
+: "${ZC_BRIDGE_LOG_LEVEL:=1}"
+: "${ZC_DRM_DEVICE:=/dev/dri/card0}"
+: "${ZC_GBM_SHIM_DIR:=${ZC_PREFIX:-/opt/zc/current}/lib}"
+: "${ZC_DRMFAKE_LIB:=${ZC_PREFIX:-/opt/zc/current}/lib/libdrmfake.so}"
+: "${ZC_STATE_DIR:=${HOME:-/tmp}/.local/state/zc-run}"
+: "${ZC_LOG_MAX_BYTES:=1048576}"
+: "${ZC_ENABLE_CHROMIUM:=1}"
+: "${ZC_ENABLE_WEBKIT:=1}"
+: "${ZC_GSK_RENDERER:=}"
+: "${ZC_CHROMIUM_FLAGS:=--ozone-platform=wayland --render-node-override=$ZC_DRM_DEVICE}"
+
+NO_SHIM=0
+PRINT_ENV=0
+FORCE_CLASS=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --) shift; break ;;
+        --no-shim) NO_SHIM=1; shift ;;
+        --print-env) PRINT_ENV=1; shift ;;
+        --class=*) FORCE_CLASS=${1#*=}; shift ;;
+        --class) FORCE_CLASS=${2:-}; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        -*) echo "zc-run: unknown option: $1" >&2; usage >&2; exit 2 ;;
+        *) break ;;
+    esac
+done
+
+if [ "${ZC_RUN_DISABLE:-0}" = "1" ]; then exec "$@"; fi
+if [ -z "$FORCE_CLASS" ] && [ -n "${ZC_RUN_CLASS:-}" ]; then
+    FORCE_CLASS=$ZC_RUN_CLASS
+fi
+[ "$#" -gt 0 ] || { usage >&2; exit 2; }
+CMD=$1
+ARGV=("$@")
+
+rotate_log() {
+    local log=$1 max=$2
+    [ -f "$log" ] || return 0
+    local size
+    size=$(stat -c %s "$log" 2>/dev/null || echo 0)
+    [ "$size" -gt "$max" ] && mv -f "$log" "$log.1"
+    return 0
+}
+
+log() {
+    mkdir -p "$ZC_STATE_DIR" 2>/dev/null || return 0
+    local log="$ZC_STATE_DIR/zc-run.log"
+    rotate_log "$log" "$ZC_LOG_MAX_BYTES"
+    printf '%s pid=%s %s\n' "$(date -Is)" "$$" "$*" >> "$log" 2>/dev/null || true
+}
+
+prepend_path() {
+    local var=$1 val=$2 cur
+    cur=${!var:-}
+    case ":$cur:" in
+        *":$val:"*) return 0 ;;
+    esac
+    printf -v "$var" '%s' "$val${cur:+:$cur}"
+    export "${var?}"
+}
+
+remove_path_component() {
+    local var=$1 drop=$2 cur out="" part
+    cur=${!var:-}
+    [ -n "$cur" ] || return 0
+    local IFS=:
+    for part in $cur; do
+        [ "$part" = "$drop" ] && continue
+        out=${out:+$out:}$part
+    done
+    unset IFS
+    if [ -n "$out" ]; then export "${var?}=$out"; else unset "$var"; fi
+}
+
+# Runtime dir: runuser/su reset it, so always resolve explicitly.
+if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR:-/nonexistent}" ]; then
+    for c in /run/colle "/run/user/$(id -u)"; do
+        if [ -d "$c" ]; then XDG_RUNTIME_DIR=$c; export XDG_RUNTIME_DIR; break; fi
+    done
+fi
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ] \
+   && [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
+    WAYLAND_DISPLAY=wayland-1; export WAYLAND_DISPLAY
+fi
+
+# --- already-wrapped entries: never inject the same env twice ---------------
+HANDLED=""
+if [ "$CMD" = "/usr/local/bin/google-chrome" ]; then
+    HANDLED=chrome-gpu-wrapper
+else
+    case "$(basename -- "$CMD")" in
+        dbx-dmabuf) HANDLED=dbx-dmabuf ;;
+        noctalia-dt) HANDLED=noctalia-dt ;;
+        gpu-app-bridge|gpu-app-bridge-shm) HANDLED=gpu-app-bridge ;;
+        gpu-app-x11) HANDLED=gpu-app-x11 ;;
+        google-chrome-gpu) HANDLED=chrome-gpu-wrapper ;;
+        google-chrome|google-chrome-stable)
+            if grep -aq '/usr/local/bin/google-chrome' "$CMD" 2>/dev/null; then
+                HANDLED=chrome-gpu-delegator
+            fi ;;
+    esac
+fi
+if [ -n "$HANDLED" ] && [ -z "$FORCE_CLASS" ]; then
+    if [ "$PRINT_ENV" = 1 ]; then
+        printf 'CLASS=handled\nCMD=%s\nINJECT=none\nHANDLED=%s\n' "$CMD" "$HANDLED"
+        exit 0
+    fi
+    log "class=handled reason=$HANDLED cmd=$CMD action=passthrough"
+    exec "${ARGV[@]}"
+fi
+
+# Nested zc-run for the exact same command inherits a complete env already.
+if [ "${ZC_RUN_ACTIVE:-}" = "$CMD" ] && [ -z "$FORCE_CLASS" ]; then
+    if [ "$PRINT_ENV" = 1 ]; then
+        printf 'CLASS=nested\nCMD=%s\nINJECT=none\n' "$CMD"
+        exit 0
+    fi
+    log "class=nested cmd=$CMD action=passthrough"
+    exec "${ARGV[@]}"
+fi
+
+# --- classification -------------------------------------------------------
+if [ -n "$FORCE_CLASS" ]; then
+    CLASS=$FORCE_CLASS
+    EVIDENCE="forced"
+elif [ -x "$ZC_CLASSIFY" ]; then
+    CLASS=$("$ZC_CLASSIFY" "$@" 2>/dev/null) || CLASS=unknown
+    EVIDENCE="zc-classify"
+else
+    CLASS=unknown; EVIDENCE="classifier-missing"
+fi
+
+INJECT=""
+
+if [ "$CLASS" = "passthrough" ]; then
+    if [ "$PRINT_ENV" = 1 ]; then
+        printf 'CLASS=passthrough\nCMD=%s\nINJECT=none\n' "$CMD"
+        exit 0
+    fi
+    log "class=passthrough evidence=$EVIDENCE cmd=$CMD inject=none action=passthrough"
+    exec "${ARGV[@]}"
+fi
+
+# Unknown toolkit: no evidence that injection helps, so do not touch the env.
+if [ "$CLASS" = "unknown" ]; then
+    if [ "$PRINT_ENV" = 1 ]; then
+        printf 'CLASS=unknown\nCMD=%s\nINJECT=none\n' "$CMD"
+        exit 0
+    fi
+    log "class=unknown evidence=$EVIDENCE cmd=$CMD inject=none action=passthrough"
+    exec "${ARGV[@]}"
+fi
+
+# Known non-GUI / already-managed entry point: never wrap it.
+if [ "$CLASS" = "known-skip" ]; then
+    if [ "$PRINT_ENV" = 1 ]; then
+        printf 'CLASS=known-skip\nCMD=%s\nINJECT=none\n' "$CMD"
+        exit 0
+    fi
+    log "class=known-skip evidence=$EVIDENCE cmd=$CMD inject=none action=passthrough"
+    exec "${ARGV[@]}"
+fi
+
+# --- global safe env (never LD_PRELOAD/gbm/GDK/QT) -------------------------
+ENV_PRESET=0
+if [ "${__EGL_VENDOR_LIBRARY_FILENAMES:-}" = "$ZC_EGL_VENDOR_JSON" ] \
+   && [ "${VK_DRIVER_FILES:-}" = "$ZC_ICD" ] \
+   && [ "${VKBRIDGE_SOCKET:-}" = "$ZC_BRIDGE_SOCKET" ] \
+   && [ "${MESA_LOADER_DRIVER_OVERRIDE:-}" = "zink" ]; then
+    ENV_PRESET=1
+fi
+
+if [ "$ENV_PRESET" = 1 ]; then
+    INJECT="env-preset"
+else
+    prepend_path LD_LIBRARY_PATH "$ZC_MESA_DIR/candidate/usr/lib"
+    export __EGL_VENDOR_LIBRARY_FILENAMES="$ZC_EGL_VENDOR_JSON"
+    export VK_DRIVER_FILES="$ZC_ICD"
+    export VKBRIDGE_SOCKET="$ZC_BRIDGE_SOCKET"
+    export VKBRIDGE_LOG_LEVEL="${VKBRIDGE_LOG_LEVEL:-$ZC_BRIDGE_LOG_LEVEL}"
+    export MESA_LOADER_DRIVER_OVERRIDE=zink
+    export GALLIUM_DRIVER=zink
+    export LIBGL_KOPPER_DISABLE=false
+    export XWAYLAND_GBM_DEVICE="$ZC_DRM_DEVICE"
+    export WEBKIT_WEB_RENDER_DEVICE_FILE="$ZC_DRM_DEVICE"
+    export WEBKIT_DMABUF_RENDERER_DISABLE_GBM=1
+    export WEBKIT_DISABLE_DMABUF_RENDERER=0
+    unset VK_ICD_FILENAMES LIBGL_ALWAYS_SOFTWARE VKBRIDGE_WSI_SHM MESA_KOPPER_LIFECYCLE_TRACE
+    INJECT="global-env"
+fi
+
+# --- per-toolkit injection ------------------------------------------------
+if [ "$NO_SHIM" = 0 ]; then
+    case "$CLASS" in
+        chromium)
+            if [ "$ZC_ENABLE_CHROMIUM" = 1 ]; then
+                prepend_path LD_LIBRARY_PATH "$ZC_GBM_SHIM_DIR"
+                [ -n "${LD_PRELOAD:-}" ] && { unset LD_PRELOAD; INJECT="$INJECT,unset-LD_PRELOAD"; }
+                read -r -a FLAGS <<< "$ZC_CHROMIUM_FLAGS"
+                ARGV+=("${FLAGS[@]}")
+                INJECT="$INJECT,gbm-shim,chromium-flags"
+                # Electron/Chromium aborts when its SUID helper is not 4755.
+                # Only then fall back to --no-sandbox (Chrome's own helper is 4755).
+                CB=$(readlink -f -- "$CMD" 2>/dev/null || printf '%s' "$CMD")
+                CB="$(dirname -- "$CB")/chrome-sandbox"
+                if [ -e "$CB" ]; then
+                    CB_MODE=$(stat -c %a -- "$CB" 2>/dev/null || true)
+                    if [ "$CB_MODE" != "4755" ]; then
+                        HAS_NS=0
+                        for A in "${ARGV[@]}"; do [ "$A" = "--no-sandbox" ] && HAS_NS=1; done
+                        if [ "$HAS_NS" = 0 ]; then
+                            ARGV+=(--no-sandbox)
+                            INJECT="$INJECT,no-sandbox(helper-mode=$CB_MODE)"
+                        fi
+                    fi
+                fi
+            fi ;;
+        webkit)
+            if [ "$ZC_ENABLE_WEBKIT" = 1 ]; then
+                remove_path_component LD_LIBRARY_PATH "$ZC_GBM_SHIM_DIR"
+                prepend_path LD_PRELOAD "$ZC_DRMFAKE_LIB"
+                : "${LIBDRM_SHIM_LOG:=${ZC_STATE_DIR}/libdrm-shim.log}"
+                export LIBDRM_SHIM_LOG
+                INJECT="$INJECT,libdrmfake,no-gbm-shim"
+            fi ;;
+        flutter)
+            export GDK_BACKEND=wayland
+            if [ "${FLUTTER_LINUX_RENDERER:-}" = "software" ]; then unset FLUTTER_LINUX_RENDERER; fi
+            INJECT="$INJECT,gdk-wayland" ;;
+        qt)
+            export QT_QPA_PLATFORM=wayland
+            INJECT="$INJECT,qt-wayland" ;;
+        gtk4)
+            export GDK_BACKEND=wayland
+            [ -n "$ZC_GSK_RENDERER" ] && export GSK_RENDERER="$ZC_GSK_RENDERER"
+            INJECT="$INJECT,gdk-wayland" ;;
+        x11)
+            if [ -z "${DISPLAY:-}" ]; then
+                log "class=x11 cmd=$CMD warning=DISPLAY-unset action=pass-through"
+                INJECT="$INJECT,x11-no-display"
+            else
+                # Never inherit a software-rendering shell; GLX must reach zink.
+                unset LIBGL_ALWAYS_SOFTWARE
+                export MESA_LOADER_DRIVER_OVERRIDE=zink
+                export GALLIUM_DRIVER=zink
+                export LIBGL_KOPPER_DISABLE=false
+                export XWAYLAND_GBM_DEVICE="$ZC_DRM_DEVICE"
+                INJECT="$INJECT,x11-zink"
+            fi ;;
+        gecko)
+            # Firefox/Zen: Wayland + WebRender on the Mali bridge; no gbm/drm shims.
+            unset LIBGL_ALWAYS_SOFTWARE
+            export MOZ_ENABLE_WAYLAND=1
+            export GDK_BACKEND=wayland
+            export MOZ_DRM_DEVICE="$ZC_DRM_DEVICE"
+            INJECT="$INJECT,gecko-wayland" ;;
+        sdl|terminal) : ;;
+        *) INJECT="$INJECT,unknown-class:$CLASS" ;;
+    esac
+fi
+
+log "class=$CLASS evidence=$EVIDENCE cmd=$CMD inject=$INJECT no_shim=$NO_SHIM argc=${#ARGV[@]}"
+
+if [ "$PRINT_ENV" = 1 ]; then
+    printf 'CLASS=%s\nCMD=%s\nINJECT=%s\n' "$CLASS" "$CMD" "$INJECT"
+    for v in LD_LIBRARY_PATH LD_PRELOAD GDK_BACKEND QT_QPA_PLATFORM GSK_RENDERER FLUTTER_LINUX_RENDERER \
+             XDG_RUNTIME_DIR WAYLAND_DISPLAY DISPLAY LIBGL_ALWAYS_SOFTWARE \
+             MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER LIBGL_KOPPER_DISABLE \
+             __EGL_VENDOR_LIBRARY_FILENAMES VK_DRIVER_FILES VKBRIDGE_SOCKET VKBRIDGE_LOG_LEVEL \
+             XWAYLAND_GBM_DEVICE MOZ_ENABLE_WAYLAND MOZ_DRM_DEVICE \
+             WEBKIT_WEB_RENDER_DEVICE_FILE WEBKIT_DMABUF_RENDERER_DISABLE_GBM WEBKIT_DISABLE_DMABUF_RENDERER; do
+        printf '%s=%s\n' "$v" "${!v-<unset>}"
+    done
+    exit 0
+fi
+
+# Failures before exec are logged; after exec the app owns the log.
+if ! command -v -- "$CMD" >/dev/null 2>&1; then
+    log "class=$CLASS cmd=$CMD action=exec-failed reason=not-found"
+    echo "zc-run: command not found: $CMD" >&2
+    exit 127
+fi
+
+export ZC_RUN_ACTIVE="$CMD"
+exec "${ARGV[@]}"

@@ -1,0 +1,49 @@
+name: validate-patches
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  anland-smithay:
+    name: Anland + Smithay patches
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone Anland upstream
+        run: git clone --depth 1 --branch legacy https://github.com/SuperTurtleDev/anland.git /tmp/anland
+
+      - name: Apply Touch patch
+        run: git -C /tmp/anland apply "$GITHUB_WORKSPACE/patches/anland/0001-touch-seat.patch"
+
+      - name: Apply Smithay AFBC patch
+        run: git -C /tmp/anland apply "$GITHUB_WORKSPACE/patches/smithay/0001-afbc-linear-size-check.patch"
+
+      - name: Validate Smithay patch against pinned revision
+        run: |
+          git clone --filter=blob:none https://github.com/Smithay/smithay.git /tmp/smithay
+          git -C /tmp/smithay checkout ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef
+          patch --dry-run -p1 -d /tmp/smithay -i /tmp/anland/producers/niri/Arch_v5/smithay.patch
+
+  syntax:
+    name: Shell and Python syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check scripts by shebang
+        run: |
+          set -e
+          for f in host/*.sh scripts/*.sh src/zc-run/zc-run src/zc-run/zc-classify; do
+            if head -n 1 "$f" | grep -q 'bash'; then
+              bash -n "$f"
+            else
+              sh -n "$f"
+            fi
+          done
+          python3 -m py_compile src/zc-run/zc-sync

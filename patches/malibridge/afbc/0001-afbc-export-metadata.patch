@@ -1,0 +1,572 @@
+From e7ee6bee60db12114c77093036a8b4f8efabc57a Mon Sep 17 00:00:00 2001
+From: zhengwenming <zhengwenming@apexsoft.com.cn>
+Date: Sun, 8 Nov 2026 03:06:14 +0800
+Subject: [PATCH] server: make a dma-buf import of a compressed export ask for
+ the export's size
+
+Mali r56 lays an AFBC image out with the superblock row pitch (1668x2173 BGRA8:
+27,648) and answers that pitch from vkGetImageSubresourceLayout, while the memory
+requirement is the 16x16 superblocks' payload (3,760,128 bytes). An importer that
+passes the layout back while naming DRM_FORMAT_MOD_LINEAR has the pitch read as a
+pixel row's: 27,648 x 2172 + 6,672 = 60,058,128 bytes asked of a 3,760,128-byte
+dma-buf, and vkAllocateMemory fails with VK_ERROR_INVALID_EXTERNAL_HANDLE (-1000072003).
+Zink loses the surface and Gecko falls back to wl_shm. The explicit AFBC modifier
+with the full layout is refused by the driver outright
+(VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT).
+
+The server now remembers the shape and plane layout of the dma-buf exports it made
+(server_dmabuf_meta.c) and, when an import carries one of them, creates the image at
+the export's modifier without the explicit plane layout: the driver lays it out as
+the exporter did, vkGetImageMemoryRequirements matches the dma-buf, and the layout
+and modifier answers stay the exporter's. LINEAR exports are not remembered - their
+importers are right about LINEAR - and the client is unchanged.
+
+tests/dbmeta_unit.c covers the register and runs in host/run_ci_tests.sh.
+docs/afbc-dmabuf-import.md has the measurements, a no-application reproduction and
+the remaining exporter-side boundary (Zen's wl_buffer names LINEAR with the
+compressed stride; the compositor then refuses it).
+---
+ docs/afbc-dmabuf-import.md  | 124 ++++++++++++++++++++++++++++++++++++
+ host/CMakeLists.txt         |  10 +++
+ host/Makefile               |   6 ++
+ host/run_ci_tests.sh        |   2 +
+ server/server_dmabuf_meta.c |  73 +++++++++++++++++++++
+ server/server_dmabuf_meta.h |  34 ++++++++++
+ server/server_emu_layer.c   |  74 +++++++++++++++++++++
+ tests/dbmeta_unit.c         |  99 ++++++++++++++++++++++++++++
+ 8 files changed, 422 insertions(+)
+ create mode 100644 docs/afbc-dmabuf-import.md
+ create mode 100644 server/server_dmabuf_meta.c
+ create mode 100644 server/server_dmabuf_meta.h
+ create mode 100644 tests/dbmeta_unit.c
+
+diff --git a/docs/afbc-dmabuf-import.md b/docs/afbc-dmabuf-import.md
+new file mode 100644
+index 0000000..7ba7531
+--- /dev/null
++++ b/docs/afbc-dmabuf-import.md
+@@ -0,0 +1,124 @@
++# Compressed dma-buf exports and imports that name LINEAR
++
++A dma-buf image at DRM-format-modifier tiling can be laid out by a compression scheme (AFBC on Mali).
++`vkGetImageSubresourceLayout` then answers with the compressed layout: on Mali the row pitch is the
++bytes of one superblock row, not of one pixel row. An importer that passes that layout back while
++naming `DRM_FORMAT_MOD_LINEAR` gets a linear image sized from the pitch, which is far larger than the
++dma-buf.
++
++## Measured on Mali-G2-Ultra-NX MC16 (driver r56), 2026-11-08
++
++The exporter is a Zink surface: 1668x2173 `VK_FORMAT_B8G8R8A8_UNORM`, usage `0x97`, flags `0x8`
++(`VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`), a one-view-format format list, and a modifier list of the
++AFBC modifiers.
++
++| | Value |
++|---|---|
++| Modifier the driver chose | `0x0820000000000101` |
++| Memory requirement, and the dma-buf's size | 3,760,128 bytes (1728x2176 payload at 8 bpp) |
++| `vkGetImageSubresourceLayout` (COLOR and MEMORY_PLANE_0) | offset 0, rowPitch 27,648, size 3,760,128 |
++
++27,648 is 108 superblocks x 256 bytes: one superblock row of payload.
++
++The importer then created a DRM-modifier image with
++`VkImageDrmFormatModifierExplicitCreateInfoEXT { drmFormatModifier = 0, planeCount = 1,
++pPlaneLayouts = {offset 0, rowPitch 27,648, size 0} }`. Mali read the pitch as a pixel row's:
++
++```
++rowPitch x (height - 1) + width x 4 = 27,648 x 2172 + 6,672 = 60,058,128 bytes
++```
++
++`vkAllocateMemory` of 60,058,128 bytes against the 3,760,128-byte dma-buf failed with
++`VK_ERROR_INVALID_EXTERNAL_HANDLE` (-1000072003). The server logged:
++
++```
++dma-buf import: 60058128 bytes asked for, the dma-buf has 3760128 (an importer's image laid out unlike the exporter's?)
++device 457: vkAllocateMemory of 60058128 bytes in memory type 12 (flags 0xb, heap 0), dedicated to an image, dma-buf import, failed: -1000072003
++```
++
++Two more shapes of the same import do not work either:
++
++- the explicit AFBC modifier with the full layout (`rowPitch` and `size`) is refused with
++  `VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT`;
++- the AFBC modifier with the row pitch alone is laid out as the exporter (3,760,128 bytes) and
++  imports, but requires the caller to know the modifier that the LINEAR answer hides.
++
++## What the server does
++
++`server/server_dmabuf_meta.c` keeps the newest 64 dma-buf exports: format, extent, mip and layer
++counts, the modifier the driver chose, and the plane layout `vkGetImageSubresourceLayout` answered.
++
++`server/server_emu_layer.c` matches every dma-buf import that names an explicit DRM modifier and one
++plane layout against that register (same format, extent, mips, layers, offset and row pitch; a zero
++size matches any). On a match the image is created at the export's modifier alone, without the
++explicit plane layout:
++
++```c
++vkb_emu_chain_take(ci, VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT);
++VkImageDrmFormatModifierListCreateInfoEXT list = { ..., 1, &export_modifier };
++```
++
++The driver lays the image out exactly as the exporter did, `vkGetImageMemoryRequirements` answers
++3,760,128 bytes, `vkGetImageSubresourceLayout` answers the layout the importer passed, and
++`vkGetImageDrmFormatModifierPropertiesEXT` answers the real (compressed) modifier. If the driver
++refuses the list, the create info goes back to what the app asked and the existing retries run.
++
++The register only answers modifiers other than LINEAR: a LINEAR export's importer is right about
++LINEAR, and nothing changes for it. LINEAR exports, AHardwareBuffer dma-bufs, and the client are
++untouched.
++
++## Expected log
++
++The first eight matches log:
++
++```
++dma-buf import image (format 44 1668x2173): its layout (offset 0, row pitch 27648, size 3760128) is the dma-buf export's; made at modifier 0x820000000000101 without the explicit plane layout
++```
++
++With the fix, an import of the dma-buf above asks 3,760,128 bytes and succeeds, and no
++`60058128 bytes asked for` line appears.
++
++## Reproducing without an application
++
++1. Create an image with `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT`, a `VkExternalMemoryImageCreateInfo`
++   with `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT`, and a `VkImageDrmFormatModifierListCreateInfoEXT`
++   of the compressed modifiers `vkGetPhysicalDeviceFormatProperties2` lists for the format (leave
++   LINEAR out, or the driver picks it first).
++2. Record `vkGetImageMemoryRequirements`, `vkGetImageDrmFormatModifierPropertiesEXT` and
++   `vkGetImageSubresourceLayout` for `VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT`; allocate the memory
++   with `VkExportMemoryAllocateInfo`; get the dma-buf with `vkGetMemoryFdKHR`.
++3. Create a second image with the same format, extent, usage and flags, and a
++   `VkImageDrmFormatModifierExplicitCreateInfoEXT` naming `DRM_FORMAT_MOD_LINEAR` with the plane
++   layout from step 2.
++4. On an unfixed server, step 3 needs 60,058,128 bytes and the import fails; with the fix it needs
++   3,760,128 bytes and binds.
++
++## Tests
++
++`tests/dbmeta_unit.c` covers the register (matching, size 0, wrong pitch/offset/format/extent/mips/
++layers, LINEAR exports, newest wins, the oldest falls out) and runs in `host/run_ci_tests.sh`.
++
++## Measured with an application: Zen 1.24.1b on the same tablet
++
++Before the change, Zink's import of its own 1668x2173 export asked 60,058,128 bytes and failed
++(`zink: couldn't allocate memory: heap=0 size=60058128`), and Gecko fell back to `wl_shm`.
++
++With the change, the same run creates the import at the export's modifier:
++
++```
++dma-buf import image (format 44 1668x2173): its layout (offset 0, row pitch 27648, size 0) is the dma-buf export's; made at modifier 0x820000000000101 without the explicit plane layout
++```
++
++The 60,058,128-byte allocation is gone. The compositor then refuses the buffer Zen presents:
++
++```
++(niri) Wayland protocol error: [destroyed object]: error 6: Invalid stride (27648) or height (2173) for plane 0.
++```
++
++Zen's wl_buffer names `DRM_FORMAT_MOD_LINEAR` with the compressed export's stride. The bridge is not
++the source of that metadata: it answers `vkGetImageDrmFormatModifierPropertiesEXT` for the export
++image with the true modifier (`0x0820000000000101`, logged), and the exporter is the caller of
++`vkCreateImage`/`vkGetMemoryFdKHR` that hands the buffer to the compositor. An exporter must use the
++modifier it queried (or a stride that matches the modifier it names). Until it does, this fix removes
++the allocation failure and the silent `wl_shm` fallback starts at the compositor instead.
++
+diff --git a/host/CMakeLists.txt b/host/CMakeLists.txt
+index cf0e6e9..3a71772 100644
+--- a/host/CMakeLists.txt
++++ b/host/CMakeLists.txt
+@@ -333,6 +333,15 @@ target_link_libraries(capgate_unit PRIVATE vkb_host_flags)
+ target_include_directories(capgate_unit PRIVATE "${SRV}")
+ vkb_host_output(capgate_unit)
+ 
++# The register of dma-buf export layouts (server/server_dmabuf_meta.c) on its own (run_ci_tests.sh)
++add_executable(dbmeta_unit
++    "${VKB}/tests/dbmeta_unit.c"
++    "${SRV}/server_dmabuf_meta.c"
++)
++target_link_libraries(dbmeta_unit PRIVATE vkb_host_flags)
++target_include_directories(dbmeta_unit PRIVATE "${SRV}")
++vkb_host_output(dbmeta_unit)
++
+ # A vertex shader's clip distance drawn (clip_check.sh, capgate_test.sh)
+ add_executable(clip_pipeline "${VKB}/tests/clip_pipeline.c")
+ target_link_libraries(clip_pipeline PRIVATE vkb_host_flags ${CMAKE_DL_LIBS})
+@@ -528,6 +537,7 @@ add_custom_target(ci-test
+         asyncpipe_check
+         xfb_check
+         capgate_unit
++        dbmeta_unit
+         clip_pipeline
+         downgrade_corpus
+         shmbarrier_corpus
+diff --git a/host/Makefile b/host/Makefile
+index 3047d32..e5495cf 100644
+--- a/host/Makefile
++++ b/host/Makefile
+@@ -27,6 +27,7 @@ TESTS += compileburst_check
+ TESTS += presentwait_check
+ TESTS += dabreg_unit dmabufahb_check
+ TESTS += dshape_unit dmabufsize_check
++TESTS += dbmeta_unit
+ TESTS += bcauto_unit
+ TESTS += querystuck_check
+ TESTS += sparse_check
+@@ -101,6 +102,11 @@ $(OUT)/bcauto_unit: $(VKB)/tests/bcauto_unit.c $(SRV)/server_bc_auto.h
+ 	@mkdir -p $(OUT)
+ 	$(CC) $(CFLAGS) $(SAN) $(WARN) -I$(SRV) -o $@ $(VKB)/tests/bcauto_unit.c -lm
+ 
++# dbmeta_unit: the register of dma-buf export layouts (server_dmabuf_meta.c) on its own.
++$(OUT)/dbmeta_unit: $(VKB)/tests/dbmeta_unit.c $(SRV)/server_dmabuf_meta.c $(SRV)/server_dmabuf_meta.h
++	@mkdir -p $(OUT)
++	$(CC) $(CFLAGS) $(SAN) $(WARN) $(INC) -I$(SRV) -o $@ $(VKB)/tests/dbmeta_unit.c $(SRV)/server_dmabuf_meta.c -lpthread
++
+ # compilegate_unit: server_compile_gate.c on its own, the server's functions stubbed in the test.
+ $(OUT)/compilegate_unit: $(VKB)/tests/compilegate_unit.c $(SRV)/server_compile_gate.c $(SRV)/vkb_server.h
+ 	@mkdir -p $(OUT)
+diff --git a/host/run_ci_tests.sh b/host/run_ci_tests.sh
+index a8019aa..659d5f0 100755
+--- a/host/run_ci_tests.sh
++++ b/host/run_ci_tests.sh
+@@ -276,6 +276,8 @@ run_mode() {
+     # capability check before the driver (ULTRAKILL / No Man's Sky: a clip distance built-in Mali's compiler died on)
+     timeout 300 ./reqguard_test.sh >out/ci-reqguard.log 2>&1; result $? "reqguard_test ($(tail -1 out/ci-reqguard.log))" "out/ci-reqguard.log"
+     timeout 60 ./out/capgate_unit ../tests/corpus >out/ci-capgate-unit.log 2>&1; result $? "capgate_unit ($(tail -1 out/ci-capgate-unit.log))" "out/ci-capgate-unit.log"
++    # The register that answers an importer passing back a compressed export's layout, no driver needed
++    timeout 60 ./out/dbmeta_unit >out/ci-dbmeta-unit.log 2>&1; result $? "dbmeta_unit ($(tail -1 out/ci-dbmeta-unit.log))" "out/ci-dbmeta-unit.log"
+     timeout 300 ./capgate_test.sh >out/ci-capgate.log 2>&1; result $? "capgate_test ($(tail -1 out/ci-capgate.log))" "out/ci-capgate.log"
+     # What a process gone without destroying its device leaves in the server: destroyed, the heap flat
+     timeout 300 ./exitheap_test.sh >out/ci-exitheap.log 2>&1; result $? "exitheap_test ($(tail -1 out/ci-exitheap.log))" "out/ci-exitheap.log"
+diff --git a/server/server_dmabuf_meta.c b/server/server_dmabuf_meta.c
+new file mode 100644
+index 0000000..7899952
+--- /dev/null
++++ b/server/server_dmabuf_meta.c
+@@ -0,0 +1,73 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright (C) 2026 ASEbrahim and MaliBridge contributors
++ *
++ * MaliBridge - server side (bionic on the device, glibc for host tests).
++ *
++ * Why this register exists (Mali-G2-Ultra-NX MC16, driver r56, 2026-11-08): Zink exported a
++ * 1668x2173 BGRA8 dma-buf at DRM-modifier tiling. The driver chose the AFBC modifier
++ * 0x0820000000000101 and gave it 3,760,128 bytes (1728x2176 at 8bpp, the 16x16 superblocks'
++ * payload), and vkGetImageSubresourceLayout answered offset 0, rowPitch 27,648 (108 superblocks
++ * x 256 bytes), size 3,760,128. The same process then imported the dma-buf into an image that
++ * named the LINEAR modifier (0) with that rowPitch: Mali's explicit-layout path read the pitch
++ * as a pixel row's and asked 27,648 x 2172 + 6,672 = 60,058,128 bytes of a 3,760,128-byte
++ * dma-buf, and vkAllocateMemory failed with VK_ERROR_INVALID_EXTERNAL_HANDLE (-1000072003);
++ * Zink gave up on the surface and Gecko fell back to wl_shm. An explicit image at the AFBC
++ * modifier with the full layout is refused outright (VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_
++ * PLANE_LAYOUT_EXT); at that modifier with the rowPitch alone it is laid out exactly as the
++ * export (3,760,128 bytes, same layout).
++ *
++ * No API the server answers can tell an importer the modifier when its caller names LINEAR, so
++ * the layout is what identifies the export. The register holds the few dozen newest exports:
++ * a layout that matches one is that export's, and the image can be made at the export's modifier
++ * without the explicit plane layout (server_emu_layer.c, import_modifier_rescue).
++ */
++#include "server_dmabuf_meta.h"
++
++#include <pthread.h>
++#include <string.h>
++
++#define META_SHAPES 64
++
++static struct {
++    pthread_mutex_t lock;
++    vkb_meta_shape s[META_SHAPES];
++    unsigned next;
++} meta = {.lock = PTHREAD_MUTEX_INITIALIZER};
++
++void vkb_meta_note(const vkb_meta_shape *s)
++{
++    if (!s || !s->width || !s->height || !s->layout.rowPitch) return;
++    pthread_mutex_lock(&meta.lock);
++    meta.s[meta.next++ % META_SHAPES] = *s;
++    pthread_mutex_unlock(&meta.lock);
++}
++
++uint64_t vkb_meta_match(const vkb_meta_shape *s)
++{
++    uint64_t mod = 0;
++    if (!s || !s->width || !s->height || !s->layout.rowPitch) return 0;
++    pthread_mutex_lock(&meta.lock);
++    /* newest first: a later export of the same shape is the one an importer has seen */
++    for (unsigned i = 0; i < META_SHAPES; i++) {
++        const vkb_meta_shape *e = &meta.s[(meta.next + META_SHAPES - 1 - i) % META_SHAPES];
++        if (!e->width) continue;
++        if (e->format != s->format || e->width != s->width || e->height != s->height || e->mips != s->mips ||
++            e->layers != s->layers)
++            continue;
++        if (e->layout.offset != s->layout.offset || e->layout.rowPitch != s->layout.rowPitch) continue;
++        if (s->layout.size && e->layout.size != s->layout.size) continue;
++        if (!e->modifier) continue; /* a LINEAR export: the importer's LINEAR is the truth */
++        mod = e->modifier;
++        break;
++    }
++    pthread_mutex_unlock(&meta.lock);
++    return mod;
++}
++
++void vkb_meta_reset(void)
++{
++    pthread_mutex_lock(&meta.lock);
++    memset(meta.s, 0, sizeof(meta.s));
++    meta.next = 0;
++    pthread_mutex_unlock(&meta.lock);
++}
+diff --git a/server/server_dmabuf_meta.h b/server/server_dmabuf_meta.h
+new file mode 100644
+index 0000000..888c7ec
+--- /dev/null
++++ b/server/server_dmabuf_meta.h
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright (C) 2026 ASEbrahim and MaliBridge contributors
++ *
++ * MaliBridge - server side (bionic on the device, glibc for host tests).
++ *
++ * The dma-buf exports this server made, as far as an importer can name them: a small register of
++ * shape (format, extent, mips, layers), the modifier the driver chose, and the one plane layout
++ * vkGetImageSubresourceLayout gave for it. A dma-buf import that passes such a layout back is that
++ * export's consumer, whatever modifier it names (server_emu_layer.c).
++ */
++#ifndef VKB_SERVER_DMABUF_META_H
++#define VKB_SERVER_DMABUF_META_H
++
++#include <vulkan/vulkan.h>
++
++typedef struct {
++    VkFormat format;
++    uint32_t width, height, mips, layers;
++    uint64_t modifier;           /* the driver's DRM format modifier (0: DRM_FORMAT_MOD_LINEAR) */
++    VkSubresourceLayout layout;  /* the exporter's vkGetImageSubresourceLayout answer */
++} vkb_meta_shape;
++
++/* Remembers an export's shape and layout (the register keeps the newest few dozen). */
++void vkb_meta_note(const vkb_meta_shape *s);
++
++/* The modifier of an export whose shape and plane layout `s` carries, 0 where there is none.
++ * `s->modifier` is ignored: an importer that names the LINEAR modifier while passing a compressed
++ * export's layout is the case this answers. A zero size in `s->layout` matches any size. */
++uint64_t vkb_meta_match(const vkb_meta_shape *s);
++
++/* Forgets everything (the unit test). */
++void vkb_meta_reset(void);
++
++#endif
+diff --git a/server/server_emu_layer.c b/server/server_emu_layer.c
+index 5688784..8583e8a 100644
+--- a/server/server_emu_layer.c
++++ b/server/server_emu_layer.c
+@@ -17,6 +17,7 @@
+  */
+ #define _GNU_SOURCE
+ #include "server_emu.h"
++#include "server_dmabuf_meta.h"
+ #include "server_dshape.h"
+ #include "vkb_emu_formats.h"
+ 
+@@ -815,6 +816,43 @@ void vkb_emu_driver_imitate_init(vkb_srv_table *t)
+         }
+ }
+ 
++/* The shape and one-plane layout of a dma-buf import that names an explicit DRM modifier. */
++static int import_meta_shape(const VkImageCreateInfo *ci, vkb_meta_shape *q)
++{
++    if (ci->tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT || ci->imageType != VK_IMAGE_TYPE_2D || ci->mipLevels != 1 ||
++        ci->arrayLayers != 1 || ci->samples != VK_SAMPLE_COUNT_1_BIT)
++        return 0;
++    int dmabuf = 0, found = 0;
++    for (const VkBaseInStructure *b = ci->pNext; b; b = b->pNext) {
++        if (b->sType == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO)
++            dmabuf |= (((const VkExternalMemoryImageCreateInfo *)b)->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) != 0;
++        if (b->sType == VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT) {
++            const VkImageDrmFormatModifierExplicitCreateInfoEXT *x = (const void *)b;
++            if (x->drmFormatModifierPlaneCount != 1 || !x->pPlaneLayouts) return 0;
++            *q = (vkb_meta_shape){ci->format, ci->extent.width, ci->extent.height, ci->mipLevels, ci->arrayLayers,
++                                  x->drmFormatModifier, x->pPlaneLayouts[0]};
++            found = 1;
++        }
++    }
++    return dmabuf && found;
++}
++
++/* Remembers a dma-buf export's shape, chosen modifier and plane layout (server_dmabuf_meta.c). */
++static void export_meta_note(VkDevice device, VkImage image, const VkImageCreateInfo *ci)
++{
++    if (ci->tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) return;
++    const vkb_dispatch *real = vkb_emu_real();
++    VkImageDrmFormatModifierPropertiesEXT mp = {VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT};
++    if (!real->vkGetImageDrmFormatModifierPropertiesEXT ||
++        real->vkGetImageDrmFormatModifierPropertiesEXT(device, image, &mp) != VK_SUCCESS || !mp.drmFormatModifier)
++        return;
++    VkImageSubresource sub = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
++    VkSubresourceLayout l = {0};
++    real->vkGetImageSubresourceLayout(device, image, &sub, &l);
++    vkb_meta_shape s = {ci->format, ci->extent.width, ci->extent.height, ci->mipLevels, ci->arrayLayers, mp.drmFormatModifier, l};
++    vkb_meta_note(&s);
++}
++
+ static VKAPI_ATTR VkResult VKAPI_CALL emu_CreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo,
+                                                      const VkAllocationCallbacks *pAllocator, VkImage *pImage)
+ {
+@@ -837,8 +875,43 @@ static VKAPI_ATTR VkResult VKAPI_CALL emu_CreateImage(VkDevice device, const VkI
+     if (lm_candidate && linear_mod_refused(e->dev, ci)) linear_mod = linear_mod_plain(ci, VK_SUCCESS);
+     VkSubresourceLayout lm_plane = {0};
+     int lm_import = !lm_candidate && (e->flags & VKB_EMU_DMABUF_EXPORT) && has_linear_mod_explicit(ci, &lm_plane);
++    /* A dma-buf import that passes back a layout an export of this server reported, while naming
++     * the LINEAR modifier (or an explicit layout the driver's path inflates): the export is
++     * compressed (AFBC), and Mali reads its superblock row pitch as a pixel row's. 1668x2173 BGRA8
++     * asked 27,648 x 2172 + 6,672 = 60,058,128 bytes of a 3,760,128-byte dma-buf and failed with
++     * VK_ERROR_INVALID_EXTERNAL_HANDLE (Zink then lost the surface; Gecko fell back to wl_shm).
++     * Made at the export's modifier alone, the driver lays the image out as the exporter's and
++     * the layout it answers is the one the app passed (server_dmabuf_meta.c). */
++    VkImageDrmFormatModifierListCreateInfoEXT meta_list = {
++        VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT, NULL, 1, NULL};
++    uint64_t meta_mod = 0;
++    VkBaseOutStructure *meta_expl = NULL;
++    vkb_meta_shape meta_q;
++    if ((e->flags & VKB_EMU_DMABUF_EXPORT) && !linear_mod && import_meta_shape(ci, &meta_q) &&
++        (meta_mod = vkb_meta_match(&meta_q)) != 0 &&
++        (meta_expl = vkb_emu_chain_take(ci, VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT))) {
++        meta_list.pNext = ci->pNext;
++        meta_list.pDrmFormatModifiers = &meta_mod;
++        ci->pNext = (const void *)&meta_list;
++        lm_import = 0; /* not a linear image: the LINEAR-the-driver-lays-out fallback does not apply */
++        static int told;
++        if (__atomic_fetch_add(&told, 1, __ATOMIC_RELAXED) < 8)
++            VKB_INFO("dma-buf import image (format %d %ux%u): its layout (offset %llu, row pitch %llu, size %llu) is the "
++                     "dma-buf export's; made at modifier 0x%llx without the explicit plane layout",
++                     ci->format, ci->extent.width, ci->extent.height, (unsigned long long)meta_q.layout.offset,
++                     (unsigned long long)meta_q.layout.rowPitch, (unsigned long long)meta_q.layout.size,
++                     (unsigned long long)meta_mod);
++    } else {
++        meta_mod = 0;
++    }
+     if (lm_import && linear_mod_refused(e->dev, ci)) linear_mod = linear_import_plain(ci, VK_SUCCESS);
+     VkResult r = driver_create_image(device, ci, pAllocator, pImage);
++    if (r != VK_SUCCESS && meta_mod) {
++        /* What the app asked again, and the retries it has always had. */
++        ci->pNext = (const void *)meta_expl;
++        meta_mod = 0;
++        r = driver_create_image(device, ci, pAllocator, pImage);
++    }
+     if (r != VK_SUCCESS && (lm_candidate || lm_import) && !linear_mod) {
+         linear_mod = lm_candidate ? linear_mod_plain(ci, r) : linear_import_plain(ci, r);
+         r = driver_create_image(device, ci, pAllocator, pImage);
+@@ -882,6 +955,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL emu_CreateImage(VkDevice device, const VkI
+                 vkb_srv_table *t = vkb_srv_current_table();
+                 VKB_INFO("dma-buf image %llx (pid %d): format %d %ux%u tiling %d usage 0x%x flags 0x%x", (unsigned long long)(uintptr_t)*pImage,
+                          t && t->proc ? t->proc->pid : 0, ci->format, ci->extent.width, ci->extent.height, ci->tiling, ci->usage, ci->flags);
++                export_meta_note(device, *pImage, ci);
+                 break;
+             }
+     } else {
+diff --git a/tests/dbmeta_unit.c b/tests/dbmeta_unit.c
+new file mode 100644
+index 0000000..05f4f69
+--- /dev/null
++++ b/tests/dbmeta_unit.c
+@@ -0,0 +1,99 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright (C) 2026 ASEbrahim and MaliBridge contributors
++ *
++ * dbmeta_unit: the register of dma-buf export layouts (server/server_dmabuf_meta.c), built alone.
++ * It answers an importer that passes back an export's plane layout, whatever modifier it names
++ * (Mali r56: a 1668x2173 BGRA8 AFBC export laid out at row pitch 27,648 / 3,760,128 bytes was
++ * imported as LINEAR with that pitch, and Mali asked 60,058,128 bytes of the dma-buf).
++ *   1 an export's layout matches, with the size given or left 0
++ *   2 another size, pitch or offset: not answered
++ *   3 another format, extent, mips or layers: not answered
++ *   4 a LINEAR export is never answered (the importer's LINEAR is the truth)
++ *   5 the newest export of a shape is the one given
++ *   6 the register keeps the newest 64: the oldest is forgotten
++ * Prints PASS/FAIL lines and "OK: 0 failures" / "FAILED: n failures".
++ */
++#include "server_dmabuf_meta.h"
++
++#include <stdio.h>
++#include <string.h>
++
++static int fails;
++static void check(int ok, const char *what)
++{
++    printf("%s %s\n", ok ? "PASS" : "FAIL", what);
++    if (!ok) fails++;
++}
++
++#define AFBC 0x0820000000000101ull
++#define OTHER 0x0820000000000102ull
++
++static vkb_meta_shape mk(uint32_t fmt, uint32_t w, uint32_t h, uint64_t mod, uint64_t off, uint64_t pitch, uint64_t size)
++{
++    vkb_meta_shape s;
++    memset(&s, 0, sizeof(s));
++    s.format = fmt;
++    s.width = w;
++    s.height = h;
++    s.mips = 1;
++    s.layers = 1;
++    s.modifier = mod;
++    s.layout.offset = off;
++    s.layout.rowPitch = pitch;
++    s.layout.size = size;
++    return s;
++}
++
++/* One call at a time, as the checks below use it (C has no address of a returned struct). */
++static vkb_meta_shape *q(uint32_t fmt, uint32_t w, uint32_t h, uint64_t mod, uint64_t off, uint64_t pitch, uint64_t size)
++{
++    static vkb_meta_shape s;
++    s = mk(fmt, w, h, mod, off, pitch, size);
++    return &s;
++}
++
++int main(void)
++{
++    vkb_meta_reset();
++    vkb_meta_note(q(44, 1668, 2173, AFBC, 0, 27648, 3760128));
++
++    /* 1 */
++    check(vkb_meta_match(q(44, 1668, 2173, 0, 0, 27648, 0)) == AFBC, "the export's layout is answered (size 0)");
++    check(vkb_meta_match(q(44, 1668, 2173, 0, 0, 27648, 3760128)) == AFBC, "the export's layout is answered (size given)");
++
++    /* 2 */
++    check(vkb_meta_match(q(44, 1668, 2173, 0, 0, 27648, 3760129)) == 0, "another size is not");
++    check(vkb_meta_match(q(44, 1668, 2173, 0, 0, 6720, 0)) == 0, "a linear pitch is not");
++    check(vkb_meta_match(q(44, 1668, 2173, 0, 4096, 27648, 0)) == 0, "another offset is not");
++
++    /* 3 */
++    check(vkb_meta_match(q(43, 1668, 2173, 0, 0, 27648, 0)) == 0, "another format is not");
++    check(vkb_meta_match(q(44, 1668, 2172, 0, 0, 27648, 0)) == 0, "another extent is not");
++    vkb_meta_shape m = mk(44, 1668, 2173, 0, 0, 27648, 0);
++    m.mips = 2;
++    check(vkb_meta_match(&m) == 0, "another mip count is not");
++    m = mk(44, 1668, 2173, 0, 0, 27648, 0);
++    m.layers = 2;
++    check(vkb_meta_match(&m) == 0, "another layer count is not");
++
++    /* 4 */
++    vkb_meta_reset();
++    vkb_meta_note(q(44, 1668, 2173, 0, 0, 6720, 14602560));
++    check(vkb_meta_match(q(44, 1668, 2173, 0, 0, 6720, 0)) == 0, "a LINEAR export is not answered");
++    vkb_meta_note(q(44, 1668, 2173, AFBC, 0, 27648, 3760128));
++    check(vkb_meta_match(q(44, 1668, 2173, 0, 0, 27648, 0)) == AFBC, "the compressed export of the shape is");
++
++    /* 5 */
++    vkb_meta_note(q(44, 1668, 2173, OTHER, 0, 27648, 3760128));
++    check(vkb_meta_match(q(44, 1668, 2173, 0, 0, 27648, 0)) == OTHER, "the newest export of the shape is given");
++
++    /* 6 */
++    vkb_meta_reset();
++    vkb_meta_note(q(44, 1668, 2173, AFBC, 0, 27648, 3760128));
++    for (unsigned i = 0; i < 64; i++) vkb_meta_note(q(44, 100 + i, 100, OTHER, 0, 1000, 1000));
++    check(vkb_meta_match(q(44, 1668, 2173, 0, 0, 27648, 0)) == 0, "the oldest export is forgotten");
++    check(vkb_meta_match(q(44, 163, 100, 0, 0, 1000, 0)) == OTHER, "the newest is still answered");
++
++    printf(fails ? "FAILED: %d failures\n" : "OK: 0 failures\n", fails);
++    return fails != 0;
++}
+-- 
+2.51.0.windows.1
+

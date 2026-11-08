@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""zc-sync: generate per-user .desktop overrides that launch through zc-run.
+
+Only user scope: reads /usr/share/applications and ~/.local/share/applications,
+writes overrides under ~/.local/share/zc-desktop/applications (never /usr/share).
+
+Entries whose Exec already routes through a GPU wrapper (zc-run, dbx-dmabuf,
+noctalia-dt, gpu-app-bridge*, the /usr/local/bin/google-chrome wrapper or its
+/usr/bin/google-chrome-stable delegator) are recorded and skipped: wrapping
+them again would inject the environment twice.
+"""
+import argparse
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+
+ZC_VERSION = "0.1.0"
+ZC_RUN = "/usr/local/bin/zc-run"
+ZC_CLASSIFY = "/usr/local/lib/zc-run/zc-classify"
+CLASSES = {"chromium", "webkit", "gecko", "flutter", "qt", "gtk4", "x11", "sdl"}
+DIRECT_WRAPPERS = {
+    "zc-run",
+    "dbx-dmabuf",
+    "noctalia-dt",
+    "gpu-app-bridge",
+    "gpu-app-bridge-shm",
+    "gpu-app-x11",
+    "google-chrome-gpu",
+}
+
+
+def parse_desktop(path):
+    """Return (lines, fields) where fields maps main-section keys to first value."""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    section = None
+    fields = {}
+    for line in lines:
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            section = s[1:-1]
+            continue
+        if section != "Desktop Entry" or "=" not in s or s.startswith("#"):
+            continue
+        k, v = s.split("=", 1)
+        fields.setdefault(k.strip(), v.strip())
+    return lines, fields
+
+
+def exec_argv(value):
+    try:
+        toks = shlex.split(value, posix=True)
+    except ValueError:
+        return []
+    return [t for t in toks if not re.fullmatch(r"%[fFuUdDnNickvm]", t)]
+
+
+def classify(argv):
+    """Return (class, evidence). Evidence comes from zc-classify --explain."""
+    if not argv:
+        return "unknown", "no-argv"
+    try:
+        out = subprocess.run(
+            [ZC_CLASSIFY, "--explain", *argv], capture_output=True, text=True, timeout=10
+        )
+        cls = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else "unknown"
+        ev = ""
+        for line in reversed(out.stderr.strip().splitlines()):
+            if line.startswith("zc-classify: "):
+                ev = line[len("zc-classify: "):]
+                break
+        return cls, ev
+    except Exception as e:
+        return "unknown", f"classifier-error:{e}"
+
+
+def find_binary(exec_value):
+    toks = exec_argv(exec_value)
+    i = 0
+    while i < len(toks) and os.path.basename(toks[i]) == "env":
+        i += 1
+        while i < len(toks) and ("=" in toks[i] or toks[i].startswith("-")):
+            i += 1
+    return toks[i] if i < len(toks) else ""
+
+
+def delegating_chrome(path):
+    """True if path is a script that execs the /usr/local/bin/google-chrome wrapper."""
+    if not os.path.isabs(path) or not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return False
+    return b"/usr/local/bin/google-chrome" in head
+
+
+def handled_reason(argv):
+    """Return a non-empty label when Exec already routes through a GPU wrapper."""
+    for tok in argv:
+        base = os.path.basename(tok)
+        if base in DIRECT_WRAPPERS:
+            return base
+        if tok == "/usr/local/bin/google-chrome":
+            return "chrome-gpu-wrapper"
+        if base in ("google-chrome", "google-chrome-stable") and delegating_chrome(tok):
+            return "chrome-gpu-delegator"
+    return ""
+
+
+def is_generated(lines):
+    return any(l.strip() == "X-ZC-Run-Generated=1" for l in lines)
+
+
+def transform(lines, source, cls, opts=""):
+    out = []
+    in_main = False
+    main_closed = False
+    has_dbus = False
+
+    def close_main():
+        nonlocal main_closed
+        if main_closed:
+            return
+        if not has_dbus:
+            out.append("DBusActivatable=false")
+        out.extend(_tail_keys(source, cls, opts))
+        main_closed = True
+
+    for line in lines:
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if in_main:
+                close_main()
+            in_main = s == "[Desktop Entry]"
+            out.append(line)
+            continue
+        if s.startswith("Exec="):
+            out.append("Exec=" + ZC_RUN + " " + s[len("Exec="):])
+            continue
+        if in_main and s.startswith("DBusActivatable="):
+            out.append("DBusActivatable=false")
+            has_dbus = True
+            continue
+        out.append(line)
+    if in_main:
+        close_main()
+    return out
+
+
+def _tail_keys(source, cls, opts):
+    keys = [
+        "X-ZC-Run-Generated=1",
+        f"X-ZC-Run-Source={source}",
+        f"X-ZC-Run-Class={cls}",
+        f"X-ZC-Run-Version={ZC_VERSION}",
+    ]
+    if opts:
+        keys.append(f"X-ZC-Run-Opts={opts}")
+    return keys
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--only", default="", help="regex on desktop id or Name")
+    ap.add_argument("--exclude", default="", help="regex on desktop id or Name")
+    ap.add_argument(
+        "--output",
+        default=str(Path.home() / ".local/share/zc-desktop/applications"),
+    )
+    ap.add_argument(
+        "--link",
+        action="store_true",
+        help="symlink overrides into ~/.local/share/applications",
+    )
+    ap.add_argument(
+        "--include-nodisplay",
+        action="store_true",
+        help="also process NoDisplay entries when --only explicitly selects them",
+    )
+    args = ap.parse_args()
+
+    home = Path(os.path.expanduser("~"))
+    scan_dirs = [Path("/usr/share/applications"), home / ".local/share/applications"]
+    output = Path(args.output).expanduser()
+    only = re.compile(args.only) if args.only else None
+    exclude = re.compile(args.exclude) if args.exclude else None
+    full_scan = not only and not exclude
+
+    # user dir wins over system for the same desktop id, except for our own
+    # generated overrides (linked back into ~/.local/share/applications): those
+    # must not shadow the system desktop file they were generated from.
+    output_resolved = str(output.resolve())
+    user_dir = home / ".local/share/applications"
+    sources = {}
+    for d in scan_dirs:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.desktop")):
+            if d == user_dir:
+                try:
+                    linked = f.is_symlink() and str(f.resolve()).startswith(output_resolved)
+                except OSError:
+                    linked = False
+                if linked:
+                    continue
+                try:
+                    if is_generated(parse_desktop(f)[0]):
+                        continue
+                except OSError:
+                    pass
+            sources[f.name] = f
+
+    output.mkdir(parents=True, exist_ok=True)
+
+    generated = 0
+    known_skip = 0
+    unknown_count = 0
+    removed = 0
+    class_counts = Counter()
+    skip_reasons = Counter()
+    skip_by_source = {}
+    handled = []
+    details = []
+
+    for name, path in sorted(sources.items()):
+        cls = ""
+        try:
+            lines, fields = parse_desktop(path)
+        except OSError as e:
+            print(f"error={name}: {e}", file=sys.stderr)
+            known_skip += 1
+            skip_reasons["parse-error"] += 1
+            skip_by_source[str(path)] = "parse-error"
+            continue
+        if is_generated(lines):
+            known_skip += 1
+            skip_reasons["generated-input"] += 1
+            continue
+        label = f"{name} {fields.get('Name', '')}"
+        reason = ""
+        if fields.get("Type", "Application") != "Application":
+            reason = "not-application"
+        elif fields.get("Hidden", "false").lower() == "true":
+            reason = "hidden"
+        elif fields.get("NoDisplay", "false").lower() == "true" and not (
+            args.include_nodisplay and only and only.search(label)
+        ):
+            reason = "no-display"
+        elif not fields.get("Exec", ""):
+            reason = "no-exec"
+        else:
+            argv = exec_argv(fields["Exec"])
+            already = handled_reason(argv)
+            if already:
+                reason = "already-handled:" + already
+                handled.append(f"{name} -> {already}")
+            elif only and not only.search(label):
+                reason = "filtered"
+            elif exclude and exclude.search(label):
+                reason = "filtered"
+            else:
+                cls, evidence = classify(argv)
+                if cls == "terminal":
+                    reason = f"terminal:{evidence}"
+                elif cls == "known-skip":
+                    reason = f"known-skip:{evidence}"
+                elif cls not in CLASSES:
+                    reason = f"unknown-class:{cls} ({evidence})"
+
+        if reason:
+            if reason.startswith("unknown-class"):
+                unknown_count += 1
+                details.append(("unknown", name, reason))
+            else:
+                known_skip += 1
+                if not reason.startswith(("no-display", "filtered", "already-handled")):
+                    details.append(("known-skip", name, reason))
+            skip_reasons[reason.split(":")[0]] += 1
+            skip_by_source[str(path)] = reason
+            continue
+
+        opts = ""
+        if args.include_nodisplay and fields.get("NoDisplay", "false").lower() == "true":
+            opts = "include-nodisplay"
+        out_lines = transform(lines, str(path), cls, opts)
+        dest = output / name
+        if args.dry_run:
+            print(f"would-generate={dest} class={cls} source={path}")
+            generated += 1
+            class_counts[cls] += 1
+            continue
+        tmp = output / (name + ".tmp")
+        tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        tmp.replace(dest)
+        generated += 1
+        class_counts[cls] += 1
+        print(f"generated={dest} class={cls} source={path}")
+
+    for h in handled:
+        print(f"skipped-handled={h}")
+
+    # Drop stale overrides: source vanished, or a full scan now skips it.
+    for f in sorted(output.glob("*.desktop")):
+        try:
+            lines, fields = parse_desktop(f)
+        except OSError:
+            continue
+        if not is_generated(lines):
+            continue
+        src = fields.get("X-ZC-Run-Source", "")
+        opts = fields.get("X-ZC-Run-Opts", "")
+        reason = ""
+        if not src or not os.path.exists(src):
+            reason = "source-missing"
+        elif full_scan and not opts and src in skip_by_source:
+            reason = "stale:" + skip_by_source[src]
+        if not reason:
+            continue
+        if args.dry_run:
+            print(f"would-remove={f.name} reason={reason}")
+        else:
+            f.unlink()
+            print(f"removed={f.name} reason={reason}")
+        removed += 1
+
+    if args.link and not args.dry_run:
+        link_dir = home / ".local/share/applications"
+        link_dir.mkdir(parents=True, exist_ok=True)
+        linked = 0
+        for f in sorted(output.glob("*.desktop")):
+            lines, _ = parse_desktop(f)
+            if not is_generated(lines):
+                continue
+            link = link_dir / f.name
+            if link.is_symlink() or not link.exists():
+                link.unlink(missing_ok=True)
+                link.symlink_to(f)
+                linked += 1
+        # prune links whose target vanished
+        for f in sorted(link_dir.glob("*.desktop")):
+            if f.is_symlink() and str(f.resolve()).startswith(str(output.resolve())):
+                if not f.resolve().exists():
+                    f.unlink()
+                    removed += 1
+        print(f"linked={linked}")
+
+    for kind, name, reason in details:
+        print(f"{kind}={name} reason={reason}")
+
+    print(
+        f"summary: total={len(sources)} generated={generated} "
+        f"known-skip={known_skip} unknown={unknown_count} removed={removed} output={output}"
+    )
+    print("classes: " + " ".join(f"{k}={v}" for k, v in sorted(class_counts.items())))
+    print("skip-reasons: " + " ".join(f"{k}={v}" for k, v in sorted(skip_reasons.items())))
+
+
+if __name__ == "__main__":
+    main()

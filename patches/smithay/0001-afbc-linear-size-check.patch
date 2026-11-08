@@ -1,0 +1,94 @@
+From 4178b4383700587c6b4f89354684d72f80709415 Mon Sep 17 00:00:00 2001
+From: zhengwenming <zhengwenming@apexsoft.com.cn>
+Date: Sun, 8 Nov 2026 05:13:15 +0800
+Subject: [PATCH] smithay: enforce linear plane size check only for linear
+ layouts
+
+A compressed modifier's stride is the pitch of the compressed block stream, not of a row of pixels, so stride * height does not bound the plane size. Restrict the plane-0 size check to LINEAR and DRM_FORMAT_MOD_INVALID (plus an unset modifier); explicit non-linear layouts are validated by the renderer at EGL import.
+
+Appends the AFBC fix to producers/niri/Arch_v5/smithay.patch and updates the smithay.patch sha256 in the Debian13 and Ubuntu2604 sources.json manifests. MSRV: Option::is_none_or is stable since Rust 1.82; Smithay declares rust-version 1.85 and sources.json pins 1.98.0, so no rewrite is needed.
+---
+ producers/niri/Arch_v5/smithay.patch      | 42 +++++++++++++++++++++++
+ producers/niri/Debian13_v5/sources.json   |  2 +-
+ producers/niri/Ubuntu2604_v5/sources.json |  2 +-
+ 3 files changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/producers/niri/Arch_v5/smithay.patch b/producers/niri/Arch_v5/smithay.patch
+index a9cd871..438cdc0 100644
+--- a/producers/niri/Arch_v5/smithay.patch
++++ b/producers/niri/Arch_v5/smithay.patch
+@@ -196,3 +196,45 @@ diff --git a/src/wayland/text_input/text_input_handle.rs b/src/wayland/text_inpu
+              debug!("discarding text-input request without IME running");
+              return;
+          }
++
++diff --git a/src/wayland/dmabuf/mod.rs b/src/wayland/dmabuf/mod.rs
++index 111eb95..387c655 100644
++--- a/src/wayland/dmabuf/mod.rs
+++++ b/src/wayland/dmabuf/mod.rs
++@@ -1130,6 +1130,17 @@ impl DmabufParamsData {
++         }
++ 
++         // 3. Validate all the planes
+++
+++        // `stride * height + offset` bounds a plane's size only for a linear
+++        // layout. For a compressed modifier (for example AFBC) `stride` is the
+++        // pitch of the compressed block stream, not of a row of pixels, so a
+++        // valid plane can be much smaller than `stride * height`. Keep the
+++        // linear size check for linear and implicit layouts; the renderer
+++        // validates the layout of an explicit non-linear modifier on import.
+++        let modifier = *self.modifier.lock().unwrap();
+++        let has_linear_layout =
+++            modifier.is_none_or(|m| m == Modifier::Linear || m == Modifier::Invalid);
+++
++         let mut planes = self.planes.lock().unwrap();
++ 
++         for plane in &*planes {
++@@ -1174,7 +1185,8 @@ impl DmabufParamsData {
++                 }
++ 
++                 // Planes > 0 can be subsampled, in which case 'size' will be smaller than expected.
++-                if plane.plane_idx == 0 && end as u64 > size {
+++                // `stride * height + offset` only bounds a plane's size for a linear layout (see above).
+++                if has_linear_layout && plane.plane_idx == 0 && end as u64 > size {
++                     params.post_error(
++                         zwp_linux_buffer_params_v1::Error::OutOfBounds,
++                         format!(
++@@ -1188,7 +1200,7 @@ impl DmabufParamsData {
++             }
++         }
++ 
++-        let modifier = self.modifier.lock().unwrap().unwrap_or(Modifier::Invalid);
+++        let modifier = modifier.unwrap_or(Modifier::Invalid);
++         let mut buf = Dmabuf::builder(
++             (width, height),
++             format,
+diff --git a/producers/niri/Debian13_v5/sources.json b/producers/niri/Debian13_v5/sources.json
+index d5a041c..b83c284 100644
+--- a/producers/niri/Debian13_v5/sources.json
++++ b/producers/niri/Debian13_v5/sources.json
+@@ -15,7 +15,7 @@
+   },
+   "patches": {
+     "niri.patch": "18b8a8deda908a227f11f7abcb82f48cea3de5195453fc7de071d0c8cbe4086f",
+-    "smithay.patch": "d23e6ea89713aa98454fa8b63071b8abd2176bf7ede65c102c811590a33b6c63",
++    "smithay.patch": "98f5f4576c2c1b44e49777ef4b71353b4245d1b954ee2d7340ce0afb12150c9e",
+     "xwayland.patch": "897fae87e2f3e94d19cf36a41b07951666f3a7a9f0612d5b5a5e077d652bf28d"
+   },
+   "rust_toolchain": "1.98.0"
+diff --git a/producers/niri/Ubuntu2604_v5/sources.json b/producers/niri/Ubuntu2604_v5/sources.json
+index bca176a..8d88fff 100644
+--- a/producers/niri/Ubuntu2604_v5/sources.json
++++ b/producers/niri/Ubuntu2604_v5/sources.json
+@@ -15,7 +15,7 @@
+   },
+   "patches": {
+     "niri.patch": "18b8a8deda908a227f11f7abcb82f48cea3de5195453fc7de071d0c8cbe4086f",
+-    "smithay.patch": "d23e6ea89713aa98454fa8b63071b8abd2176bf7ede65c102c811590a33b6c63",
++    "smithay.patch": "98f5f4576c2c1b44e49777ef4b71353b4245d1b954ee2d7340ce0afb12150c9e",
+     "xwayland.patch": "a71a000dbaa00ab122f7fa836e62c15c2bdf50d89803aa5d471210ed7515d41e"
+   }
+ }
+-- 
+2.51.0.windows.1
+

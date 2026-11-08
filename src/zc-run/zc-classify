@@ -1,0 +1,185 @@
+#!/bin/bash
+# zc-classify: identify the GUI toolkit of a command for zc-run.
+# Prints one class on stdout: chromium|webkit|gecko|flutter|qt|gtk4|x11|sdl|terminal|known-skip|passthrough|unknown
+# --explain writes the evidence to stderr.
+set -u
+PATH=${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
+export PATH
+
+EXPLAIN=0
+if [ "${1:-}" = "--explain" ]; then EXPLAIN=1; shift; fi
+say() { [ "$EXPLAIN" = 1 ] && echo "zc-classify: $*" >&2; return 0; }
+
+ARGS=("$@")
+[ "${#ARGS[@]}" -gt 0 ] || { say "no command"; echo unknown; exit 0; }
+
+# Skip env(1) and leading VAR=value assignments.
+IDX=0
+while [ "$IDX" -lt "${#ARGS[@]}" ]; do
+    B=$(basename -- "${ARGS[$IDX]}")
+    if [ "$B" = "env" ]; then
+        IDX=$((IDX + 1))
+        while [ "$IDX" -lt "${#ARGS[@]}" ]; do
+            case "${ARGS[$IDX]}" in
+                [A-Za-z_]*=*) IDX=$((IDX + 1)) ;;
+                -*) IDX=$((IDX + 1)) ;;
+                *) break ;;
+            esac
+        done
+    else
+        break
+    fi
+done
+[ "$IDX" -lt "${#ARGS[@]}" ] || { say "env without command"; echo unknown; exit 0; }
+
+CMD=${ARGS[$IDX]}
+REST=("${ARGS[@]:$((IDX + 1))}")
+BASE=$(basename -- "$CMD")
+
+# Direct passthrough launchers and shell -c wrappers.
+case "$BASE" in
+    flatpak|snap)
+        say "passthrough launcher: $BASE"; echo passthrough; exit 0 ;;
+    sh|bash|dash|zsh|ksh|fish)
+        for A in "${REST[@]}"; do
+            if [ "$A" = "-c" ]; then say "shell -c passthrough"; echo passthrough; exit 0; fi
+        done ;;
+esac
+
+if [ "${CMD#*/}" != "$CMD" ]; then
+    P=$CMD
+else
+    P=$(command -v -- "$CMD" 2>/dev/null || true)
+fi
+if [ -z "${P:-}" ] || [ ! -e "$P" ]; then
+    say "not found: $CMD"; echo unknown; exit 0
+fi
+P=$(readlink -f -- "$P" 2>/dev/null || printf '%s' "$P")
+
+CLASS=unknown
+EVIDENCE=""
+
+set_result() { CLASS=$1; EVIDENCE=$2; }
+
+# Non-GUI or already-managed entry points: classify without touching them.
+case "$BASE" in
+    noctalia) set_result known-skip "shell:noctalia (started via noctalia-dt)" ;;
+    nvim|vim|vi) set_result known-skip "tui:$BASE" ;;
+    kitty|alacritty|foot|wezterm|ghostty|konsole|gnome-terminal|xfce4-terminal|tilix|terminator)
+        set_result terminal "terminal-name:$BASE" ;;
+esac
+if [ "$CLASS" != "unknown" ] || [ -n "$EVIDENCE" ]; then
+    say "target=$P class=$CLASS evidence=$EVIDENCE"; echo "$CLASS"; exit 0
+fi
+
+elf_class() {
+    local p=$1 d b lb needed
+    d=$(dirname -- "$p"); b=$(basename -- "$p"); lb=${b,,}
+    if [ -e "$d/chrome-sandbox" ] || [ -e "$d/resources/app.asar" ] || [ -e "$d/app.asar" ]; then
+        set_result chromium "electron-dir:$d"; return
+    fi
+    case "$lb" in
+        *chrome*|*chromium*|*electron*|*cef*) set_result chromium "elf-name:$b"; return ;;
+        zen|firefox|firefox-esr|librewolf|waterfox|palemoon)
+            set_result gecko "elf-name:$b"; return ;;
+        noctalia) set_result known-skip "elf-name:noctalia"; return ;;
+        nvim|vim|vi) set_result known-skip "elf-name:$b"; return ;;
+        kitty|alacritty|foot|wezterm|ghostty|konsole|gnome-terminal|xfce4-terminal|tilix|terminator)
+            set_result terminal "elf-name:$b"; return ;;
+    esac
+    if [ -e "$d/libxul.so" ]; then
+        set_result gecko "sibling:libxul.so"; return
+    fi
+    needed=$(readelf -d "$p" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
+    if [ -z "$needed" ]; then
+        needed=$(grep -aoE 'lib[A-Za-z0-9_.+-]+\.so[0-9.]*' "$p" 2>/dev/null | sort -u)
+    fi
+    has() { printf '%s\n' "$needed" | grep -qE "$1"; }
+    if has '^libcef\.so|^libelectron\.so'; then
+        set_result chromium "needed:libcef/electron"
+    elif has '^libxul\.so'; then
+        set_result gecko "needed:libxul"
+    elif has '^libwebkit2gtk|^libwebkitgtk'; then
+        set_result webkit "needed:libwebkit2gtk"
+    elif has '^libflutter_linux_gtk'; then
+        set_result flutter "needed:libflutter_linux_gtk"
+    elif has '^libQt6Core\.so|^libQt5Core\.so'; then
+        set_result qt "needed:libQt6Core"
+    elif has '^libgtk-4\.so'; then
+        set_result gtk4 "needed:libgtk-4"
+    elif has '^libX11\.so' && ! has '^libwayland-client\.so'; then
+        set_result x11 "needed:libX11 (no wayland)"
+    elif has '^libSDL2'; then
+        set_result sdl "needed:libSDL2"
+    else
+        set_result unknown "no toolkit marker"
+    fi
+}
+
+detect() {
+    local p=$1 depth=$2 magic b lb t line tok t2
+    [ "$depth" -le 3 ] || { set_result unknown "script recursion limit"; return; }
+    [ -e "$p" ] || { set_result unknown "missing:$p"; return; }
+    magic=$(head -c 4 -- "$p" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    if [ "$magic" = "7f454c46" ]; then elf_class "$p"; return; fi
+    if [ "$magic" = "2321" ] || [ "${magic:0:2}" = "23" ]; then
+        b=$(basename -- "$p"); lb=${b,,}
+        case "$lb" in
+            *chrome*|*chromium*|*electron*|*cef*) set_result chromium "script-name:$b"; return ;;
+            zen|firefox|firefox-esr|librewolf|waterfox|palemoon)
+                set_result gecko "script-name:$b"; return ;;
+        esac
+        # Toolkit markers inside interpreted scripts (PyGObject / PyQt).
+        if grep -aqE 'PyQt[56]|PySide[26]' "$p" 2>/dev/null; then
+            set_result qt "script-content:PyQt/PySide"; return
+        fi
+        if grep -aqE "require_version\(['\"]Gtk['\"], *['\"]?4" "$p" 2>/dev/null; then
+            set_result gtk4 "script-content:Gtk4"; return
+        fi
+        if grep -aqE "require_version\(['\"]Gtk['\"], *['\"]?3|from gi\.repository import Gtk" "$p" 2>/dev/null; then
+            set_result x11 "script-content:Gtk3"; return
+        fi
+        # Follow every exec line: pick the first target that yields a toolkit.
+        # This covers wrappers such as fcitx5-configtool (several desktop
+        # branches) and usb-manager (exec python3 /usr/share/.../usb-manager.py).
+        while IFS= read -r line; do
+            for tok in $line; do
+                tok=${tok%\"}; tok=${tok#\"}; tok=${tok%\'}; tok=${tok#\'}
+                case "$tok" in
+                    exec|'') continue ;;
+                    /*)
+                        [ "$tok" = "$p" ] && continue
+                        [ -f "$tok" ] || continue
+                        if grep -aqE 'PyQt[56]|PySide[26]' "$tok" 2>/dev/null; then
+                            set_result qt "exec-arg:PyQt/PySide:$tok"; return
+                        fi
+                        if grep -aqE "require_version\(['\"]Gtk['\"], *['\"]?4" "$tok" 2>/dev/null; then
+                            set_result gtk4 "exec-arg:Gtk4:$tok"; return
+                        fi
+                        if grep -aqE "require_version\(['\"]Gtk['\"], *['\"]?3|from gi\.repository import Gtk" "$tok" 2>/dev/null; then
+                            set_result x11 "exec-arg:Gtk3:$tok"; return
+                        fi
+                        detect "$tok" $((depth + 1))
+                        [ "$CLASS" != "unknown" ] && return
+                        ;;
+                    *)
+                        [ "$tok" = "$p" ] && continue
+                        t2=$(command -v -- "$tok" 2>/dev/null || true)
+                        if [ -n "$t2" ] && [ -e "$t2" ] && [ "$t2" != "$p" ]; then
+                            detect "$t2" $((depth + 1))
+                            [ "$CLASS" != "unknown" ] && return
+                        fi ;;
+                esac
+            done
+        done < <(grep -E '^[[:space:]]*exec[[:space:]]' "$p" 2>/dev/null)
+        if grep -aqiE 'app\.asar|electron|chrome-sandbox' "$p" 2>/dev/null; then
+            set_result chromium "script-content"; return
+        fi
+        set_result unknown "script:$b"; return
+    fi
+    set_result unknown "not-elf:$p"
+}
+
+detect "$P" 0
+say "target=$P class=$CLASS evidence=$EVIDENCE"
+echo "$CLASS"

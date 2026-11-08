@@ -1,0 +1,51 @@
+From f94c9fded901a196a0f04627553c91590571b459 Mon Sep 17 00:00:00 2001
+From: zhengwenming <zhengwenming@apexsoft.com.cn>
+Date: Sun, 8 Nov 2026 05:07:04 +0800
+Subject: [PATCH] anland: announce consumer input device so niri binds the
+ touch seat
+
+Queue one InputEvent::DeviceAdded for the aggregated consumer device when the backend is created. Without this initial event niri never registers the consumer seat handle, so injected touch events have no seat target on the XRING-O3 build.
+
+Source: /data/local/tmp/touch-cand/touch-device-added.patch (sha256 a62e156709c5dca611f9395a1d10d9ea994222aded6b77264d6bbf9c45920b71). File paths normalized from backend-relative to repository-relative for -p1 application.
+---
+ producers/niri/anland_backend/input.rs | 9 +++++++++
+ producers/niri/anland_backend/mod.rs   | 3 ++-
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/producers/niri/anland_backend/input.rs b/producers/niri/anland_backend/input.rs
+index 638cac6..ddfe0dc 100644
+--- a/producers/niri/anland_backend/input.rs
++++ b/producers/niri/anland_backend/input.rs
+@@ -667,6 +667,15 @@ impl AnlandInputBackend {
+         self.pending_events.pop_front()
+     }
+ 
++    /// Announce the aggregated consumer device once so niri registers the
++    /// touch seat handle. The consumer device itself never disappears.
++    pub fn queue_consumer_device_added(&mut self) {
++        self.pending_events
++            .push_back(smithay::backend::input::InputEvent::DeviceAdded {
++                device: AnlandDevice::consumer(),
++            });
++    }
++
+     /// Flush active tablet state before DeviceRemoved on consumer disconnect.
+     pub fn queue_tablet_releases(&mut self) {
+         let time_msec = crate::utils::get_monotonic_time().as_millis() as u32;
+diff --git a/producers/niri/anland_backend/mod.rs b/producers/niri/anland_backend/mod.rs
+index e4fe0e3..e60460b 100644
+--- a/producers/niri/anland_backend/mod.rs
++++ b/producers/niri/anland_backend/mod.rs
+@@ -252,7 +252,8 @@ impl Anland {
+             (initial.width.max(1), initial.height.max(1), initial.refresh_mhz.max(1));
+         info!("anland: common device output {width}x{height} {refresh} mHz");
+         let ipc_outputs = Arc::new(Mutex::new(IpcOutputMap::new()));
+-        let input_backend = input::AnlandInputBackend::new(width, height);
++        let mut input_backend = input::AnlandInputBackend::new(width, height);
++        input_backend.queue_consumer_device_added();
+         let (selection_tx, selection_rx) = std::sync::mpsc::sync_channel(1);
+         let (clipboard_tx, clipboard_rx) = std::sync::mpsc::sync_channel(1);
+ 
+-- 
+2.51.0.windows.1
+
