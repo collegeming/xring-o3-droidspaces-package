@@ -48,13 +48,10 @@ adb shell su -c 'sh /data/local/tmp/xring-o3-host/install-host.sh \
 
 `xring-o3-mali-host-ksu-2026.11.08.zip` 把同样的 host 脚本与 server 打包成 KernelSU 模块，适合快速部署多台设备。
 
-- 模块安装只复制文件，不启动任何进程；
-- 默认不自启；需要开机启动时手动创建标记：
-
-```sh
-adb shell su -c 'touch /data/adb/modules/xring_o3_mali_host/autostart'
-```
-
+- 安装阶段只复制文件，不启动进程；
+- 开机默认自动启动 bridge，与 `droidspaces`、`anland-daemon`、旧 `malibridge` 模块的行为一致；
+- 关闭自启：编辑 `/data/adb/xring-o3-host/config.env`，把 `AUTOSTART` 改为 `0`；
+- 安装时自动禁用旧 `malibridge` 模块，避免同一 socket 起两个 server；卸载时自动恢复；
 - 模块不安装 Droidspaces/Anland APK，也不替代 rootfs 镜像；
 - 这是用户空间 KernelSU 模块，不是内核 LKM，不修改 SELinux 或 boot 镜像。
 

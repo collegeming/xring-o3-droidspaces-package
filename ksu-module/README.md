@@ -1,6 +1,6 @@
 # XRING-O3 MaliBridge 主机侧 KernelSU 模块
 
-把 Android 主机侧的 `vkbridge-server` 与主机脚本打包成 KernelSU/Magisk 模块 zip。安装时由 `customize.sh` 写入 `/data/local/tmp/xring-o3-host/`，可选在开机时启动 bridge。
+把 Android 主机侧的 `vkbridge-server` 与主机脚本打包成 KernelSU/Magisk 模块 zip。安装时由 `customize.sh` 写入 `/data/local/tmp/xring-o3-host/`；开机时默认自动启动 bridge，可在配置文件里关闭。
 
 > ⚠️ 这是 **userspace** 模块，不是内核模块（LKM）。它不加载内核驱动、不修改 boot 镜像、不改 init 脚本、不改 SELinux，也不申请 root。
 
@@ -10,7 +10,7 @@
 | --- | --- |
 | `vkbridge-server`（bionic AArch64）与主机脚本的安装 | 容器 rootfs 镜像；由 `collegeming/Droidspaces-Arch-Niri-rootfs-builder` 的 `xring-o3-mali` 分支构建 |
 | 安装清单、权限、`host.env` 首次生成与保留 | 容器内 Mesa、MaliBridge ICD、libgbm、`zc-run` 等；由 `xring-o3-mali-stack-<version>.tar.zst` 提供 |
-| 可选的 bridge 开机自启 | Droidspaces 容器创建、Anland 绑定挂载、APK 安装 |
+| bridge 开机自启（默认开启，可配置关闭） | Droidspaces 容器创建、Anland 绑定挂载、APK 安装 |
 
 主机侧与容器侧必须分开安装：`vkbridge-server` 依赖 `/dev/mali0` 与 vendor Mali 驱动，只能运行在 Android 主机；容器内的图形栈由 rootfs 包提供。本模块不使用 `.tar.zst` 主机包，因为 Android toybox 没有 `zstd`，直接把文件和二进制放进 zip。
 
@@ -19,8 +19,8 @@
 | 路径 | 作用 |
 | --- | --- |
 | `module.prop` | 模块元数据（id `xring_o3_mali_host`，版本 `2026.11.08`） |
-| `customize.sh` | 安装钩子：复制 payload、设置权限、生成或保留 `host.env`、写 `.install-manifest`；不启动任何进程 |
-| `service.sh` | 开机钩子：仅在 `autostart` 标记存在时刷新 Anland 别名并启动 bridge |
+| `customize.sh` | 安装钩子：复制 payload、设置权限、生成或保留 `host.env`、写 `.install-manifest`、写默认 `config.env`、禁用旧 `malibridge` 模块；不启动任何进程 |
+| `service.sh` | 开机钩子：默认等待 `/dev/mali0` 与 rootfs，刷新 Anland 别名并启动 bridge；`AUTOSTART=0` 时跳过 |
 | `uninstall.sh` | 卸载钩子：停止 bridge 后删除 `/data/local/tmp/xring-o3-host` |
 | `payload/*.sh` | `start-bridge.sh`、`stop-bridge.sh`、`bridge-supervisor.sh`、`anland-link.sh`、`verify-host.sh`、`install-host.sh`；`install-host.sh` 是原主机脚本安装器，随包保留，模块安装不调用它 |
 | `payload/host.env.example` | 配置模板；安装时据此生成 `host.env` |
@@ -50,21 +50,31 @@ su -c 'ksud module install /data/local/tmp/xring-o3-mali-host-ksu-2026.11.08.zip
 
 ## 开机自启
 
-默认关闭。`service.sh` 找不到标记时直接 `exit 0`。
+默认开启，与 `droidspaces`、`anland-daemon`、`anland-awl`、旧 `malibridge` 模块的行为一致：安装后无需再手工创建标记。
+
+配置在模块目录之外，升级不会重置：
 
 ```sh
-# 启用
-su -c 'touch /data/adb/modules/xring_o3_mali_host/autostart'
+# 关闭（AUTOSTART 改为 0）
+su -c 'sed -i "s/^AUTOSTART=.*/AUTOSTART=0/" /data/adb/xring-o3-host/config.env'
 
-# 关闭
-su -c 'rm -f /data/adb/modules/xring_o3_mali_host/autostart'
+# 重新开启
+su -c 'sed -i "s/^AUTOSTART=.*/AUTOSTART=1/" /data/adb/xring-o3-host/config.env'
 ```
 
-启用后每次开机执行：等待 `/dev/mali0` 最多 10 秒 → 运行 `anland-link.sh`（失败只记录，不阻断）→ 运行 `start-bridge.sh`。输出追加到 `/data/local/tmp/xring-o3-host/boot.log`。
+`config.env` 默认值：
+
+```text
+AUTOSTART=1
+WAIT_MALI_SECONDS=60
+WAIT_ROOTFS_SECONDS=60
+```
+
+开机执行顺序：等待 `/dev/mali0`（最多 60 秒）→ 等待容器 rootfs（最多 60 秒）→ 启动 bridge → 后台重试 `anland-link.sh`（最多 120 秒）。输出追加到 `/data/local/tmp/xring-o3-host/boot.log`。
+
+旧 `malibridge` 模块会在 `customize.sh` 安装时被写入 `disable` 标记，避免两个模块对同一个 socket 各起一个 server。删除 `/data/adb/modules/malibridge/disable` 可恢复旧模块。
 
 时序限制：容器的绑定挂载在创建时解析 `ANLAND_LINK`。如果 Droidspaces 在 `service.sh` 之前启动容器，容器可能挂到旧 socket 或挂载失败；此时重新运行 `anland-link.sh` 并重启容器。
-
-模块升级可能清除模块目录内的额外文件，升级后确认 `autostart` 标记仍然存在，必要时重新创建。
 
 ## 验证
 
@@ -107,7 +117,8 @@ bash ksu-module/build-module.sh \
 
 ## 已知限制
 
-- 自启默认关闭，必须手动创建标记；模块更新后需复查标记。
-- `service.sh` 只负责 bridge 与别名，不启动容器、不等待 Anland daemon；开机时 Anland 未就绪会导致别名刷新失败并写入 `boot.log`。
+- 自启默认开启；关闭用 `/data/adb/xring-o3-host/config.env` 的 `AUTOSTART=0`。
+- 安装时自动禁用旧 `malibridge` 模块；卸载时如果该标记由本模块创建，会自动恢复。
+- `service.sh` 只负责 bridge 与别名，不启动容器；Droidspaces 模块负责容器。
 - `boot.log` 每次开机追加，不轮转。
 - 本模块不改变 SELinux 策略；进程以 KernelSU root 上下文运行。

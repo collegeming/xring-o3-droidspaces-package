@@ -62,5 +62,29 @@ sort -u "$MANIFEST.tmp" > "$MANIFEST" || die "写入 manifest 失败"
 rm -f "$MANIFEST.tmp"
 chmod 0644 "$MANIFEST"
 
+# Autostart is on by default; the config lives outside the module directory so
+# a module update does not reset it.
+CFG_DIR=/data/adb/xring-o3-host
+mkdir -p "$CFG_DIR" || die "无法创建 $CFG_DIR"
+if [ ! -e "$CFG_DIR/config.env" ]; then
+    {
+        printf '# XRING-O3 MaliBridge host module\n'
+        printf 'AUTOSTART=1\n'
+        printf 'WAIT_MALI_SECONDS=60\n'
+        printf 'WAIT_ROOTFS_SECONDS=60\n'
+    } > "$CFG_DIR/config.env" || die "无法写入 $CFG_DIR/config.env"
+    chmod 0644 "$CFG_DIR/config.env"
+    ui "已写入默认配置：$CFG_DIR/config.env（AUTOSTART=1）"
+fi
+
+# The legacy malibridge module starts a second server on the same socket with
+# the older binary and budget. Disable it; deleting the disable file restores it.
+LEGACY=/data/adb/modules/malibridge
+if [ -d "$LEGACY" ] && [ ! -e "$LEGACY/disable" ]; then
+    : > "$LEGACY/disable" || ui "警告: 无法禁用旧 malibridge 模块"
+    printf 'malibridge\n' > "$CFG_DIR/.legacy-malibridge-disabled" 2>/dev/null || true
+    ui "已禁用旧 malibridge 模块（同一 socket 避免双 server；删除 $LEGACY/disable 可恢复）"
+fi
+
 ui "已安装到 $DEST"
-ui "未启动任何进程；开机自启需手动创建 $MODPATH/autostart（见 README.md）"
+ui "开机自启默认开启；关闭：把 $CFG_DIR/config.env 的 AUTOSTART 改为 0"

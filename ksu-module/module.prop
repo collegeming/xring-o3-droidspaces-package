@@ -3,4 +3,4 @@ name=XRING-O3 MaliBridge Host
 version=2026.11.08
 versionCode=20261108
 author=collegeming
-description=Android host-side MaliBridge payload for Xiaomi Pad 9 Pro Max (XRING-O3): vkbridge-server plus host scripts. Userspace KernelSU module; no kernel or SELinux changes.
+description=Android host-side MaliBridge payload for Xiaomi Pad 9 Pro Max (XRING-O3): vkbridge-server plus host scripts. Starts at boot by default (AUTOSTART=1); disables the legacy malibridge module. Userspace KernelSU module; no kernel or SELinux changes.
