@@ -1,0 +1,337 @@
+# Build the MaliBridge artifacts the XRING-O3 Mali stack consumes, from this
+# repository's patches. Manual only, artifacts only, no release.
+#
+#   client format-capacity   patches/malibridge/malibridge-format-capacity-patch.py
+#   client hook2             format-capacity + wsi-lifecycle + wl-gone + hook2,
+#                            plus patches/malibridge/malibridge-wl-gone-shim.c
+#                            built as libvkb_wl_gone.so
+#   server                   patches/malibridge/malibridge-mem-budget-patch.py,
+#                            cross-built for Android arm64-v8a with NDK r27c
+#
+# Every job checks the pinned upstream commit and the exact patch pre-state
+# before building, and verifies the post-state after. Artifacts hold the archive
+# plus SHA256SUMS. Inside the archives, the client trees are bundle fragments:
+#
+#   vkbridge/libvulkan_droidbridge.so            hook2 client (Noctalia)
+#   vkbridge/format/libvulkan_droidbridge.so     format-capacity client (zc-run)
+#   shim/libvkb_wl_gone.so                       hook2 LD_PRELOAD shim
+#   share/vulkan/icd.d/droidbridge_icd.json      -> ../../../vkbridge/...
+#   share/vulkan/icd.d/droidbridge-format.json   -> ../../../vkbridge/format/...
+#   vkbridge-server                              Android server, on PATH
+#   build-info/                                  pin, patches, ELF/ldd/ABI records
+#
+# The server is built on an x86_64 runner because the NDK's host tools are
+# x86_64; the client is a native AArch64 Linux build on an arm runner.
+name: build malibridge
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: 'build both client variants (format-capacity, hook2)'
+        type: boolean
+        default: true
+      server:
+        description: 'build the Android arm64-v8a server (mem-budget)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  MB_REPO: https://github.com/ASEbrahim/MaliBridge.git
+  MB_REVISION: 47ec18eaa9d9f83c359d56ba412a17d61ba59a66
+  VULKAN_HEADERS_TREE: 5cc90b8046cbfbd4638e0c2d0397938dab41a4ce
+
+jobs:
+  client:
+    name: client ${{ matrix.variant }}
+    if: ${{ inputs.client }}
+    runs-on: ubuntu-24.04-arm
+    container: ubuntu:26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [format-capacity, hook2]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the kit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install native client build dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git ca-certificates python3 \
+            libxcb1-dev libx11-dev libwayland-dev binutils zstd
+          test "$(uname -m)" = aarch64
+
+      - name: Fetch the pinned MaliBridge source and check the patch pre-state
+        run: |
+          set -euo pipefail
+          mkdir -p stage/build-info
+          git init malibridge
+          git -C malibridge remote add origin "$MB_REPO"
+          git -C malibridge fetch --depth 1 origin "$MB_REVISION"
+          git -C malibridge checkout --detach FETCH_HEAD
+          test "$(git -C malibridge rev-parse HEAD)" = "$MB_REVISION"
+          test "$(git -C malibridge rev-parse HEAD:third_party/Vulkan-Headers-1.4.341)" = "$VULKAN_HEADERS_TREE"
+          test -f malibridge/third_party/Vulkan-Headers-1.4.341/include/vulkan/vulkan.h
+          test -f malibridge/common/gen/vkb_gen_client.c
+          python3 -I patches/malibridge/malibridge-format-capacity-patch.py --check malibridge \
+            | tee stage/build-info/patch-preflight.txt
+          python3 -I patches/malibridge/malibridge-wsi-lifecycle-patch.py --check malibridge \
+            | tee -a stage/build-info/patch-preflight.txt
+
+      - name: Apply the client patch chain
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          case "$VARIANT" in
+            format-capacity)
+              python3 -I patches/malibridge/malibridge-format-capacity-patch.py malibridge \
+                | tee stage/build-info/patch-applied.txt
+              python3 -I patches/malibridge/malibridge-format-capacity-patch.py \
+                --verify-candidate malibridge
+              ;;
+            hook2)
+              for patch in malibridge-format-capacity malibridge-wsi-lifecycle \
+                           malibridge-wl-gone malibridge-hook2; do
+                python3 -I "patches/malibridge/$patch-patch.py" malibridge \
+                  | tee -a stage/build-info/patch-applied.txt
+              done
+              python3 -I patches/malibridge/malibridge-hook2-patch.py --verify-candidate malibridge
+              ;;
+            *)
+              echo "::error::unknown variant: $VARIANT"
+              exit 1
+              ;;
+          esac
+          git -C malibridge diff --check
+          git -C malibridge diff > stage/build-info/candidate.patch
+          test -s stage/build-info/candidate.patch
+
+      - name: Build the client and, for hook2, the wl_surface-gone shim
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          case "$VARIANT" in
+            format-capacity) libdir=stage/vkbridge/format ;;
+            hook2)           libdir=stage/vkbridge ;;
+          esac
+          mkdir -p "$libdir" stage/share/vulkan/icd.d
+          cmake -S malibridge -B mb-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DBUILD_VARIANT=linux-aarch64
+          cp mb-build/CMakeCache.txt stage/build-info/
+          cmake --build mb-build --target vulkan_droidbridge --parallel 4 \
+            | tee stage/build-info/build.log
+          cp mb-build/libvulkan_droidbridge.so "$libdir/"
+          if [ "$VARIANT" = hook2 ]; then
+            mkdir -p stage/shim
+            gcc -O2 -Wall -Wextra -shared -fPIC -o stage/shim/libvkb_wl_gone.so \
+              patches/malibridge/malibridge-wl-gone-shim.c -ldl -lpthread
+          fi
+
+      - name: Verify and package
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          case "$VARIANT" in
+            format-capacity)
+              lib=stage/vkbridge/format/libvulkan_droidbridge.so
+              icd=droidbridge-format.json
+              icd_library=../../../vkbridge/format/libvulkan_droidbridge.so
+              ;;
+            hook2)
+              lib=stage/vkbridge/libvulkan_droidbridge.so
+              icd=droidbridge_icd.json
+              icd_library=../../../vkbridge/libvulkan_droidbridge.so
+              ;;
+          esac
+          readelf -h "$lib" | tee stage/build-info/elf.txt | grep 'Machine:.*AArch64'
+          readelf -d "$lib" > stage/build-info/dynamic.txt
+          readelf --version-info "$lib" > stage/build-info/symbol-versions.txt
+          ldd "$lib" > stage/build-info/ldd.txt
+          ! grep 'not found' stage/build-info/ldd.txt
+          grep -E 'SONAME|NEEDED' stage/build-info/dynamic.txt > stage/build-info/abi.txt
+          nm -D --defined-only "$lib" | awk '{print $2, $3}' | sort > stage/build-info/exports.txt
+          sha256sum "$lib" > stage/build-info/lib-SHA256SUMS
+          if [ "$VARIANT" = format-capacity ]; then
+            strings "$lib" | grep -F 'dma-buf modifier table full' \
+              > stage/build-info/capacity-marker.txt
+            ! grep -q ' vkb_wayland_surface_gone$' stage/build-info/exports.txt
+          else
+            grep -q '^T vkb_wayland_surface_gone$' stage/build-info/exports.txt
+            strings "$lib" | grep -F 'wl_surface destroyed first' \
+              > stage/build-info/gone-marker.txt
+            strings "$lib" | grep -F 'vkb-wsi: ' > stage/build-info/trace-marker.txt
+            readelf -h stage/shim/libvkb_wl_gone.so | grep 'Machine:.*AArch64'
+            nm -D --defined-only stage/shim/libvkb_wl_gone.so | awk '{print $2, $3}' | sort \
+              > stage/build-info/shim-exports.txt
+            printf 'T wl_proxy_marshal_flags\n' > stage/build-info/shim-exports-expected.txt
+            cmp -s stage/build-info/shim-exports.txt stage/build-info/shim-exports-expected.txt
+            ldd stage/shim/libvkb_wl_gone.so > stage/build-info/shim-ldd.txt
+            ! grep 'not found' stage/build-info/shim-ldd.txt
+            sha256sum stage/shim/libvkb_wl_gone.so > stage/build-info/shim-SHA256SUMS
+          fi
+          ICD_NAME="$icd" ICD_LIBRARY="$icd_library" python3 -I - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path('stage/share/vulkan/icd.d') / os.environ['ICD_NAME']
+          p.write_text(json.dumps({'file_format_version': '1.0.0', 'ICD': {
+              'library_path': os.environ['ICD_LIBRARY'],
+              'api_version': '1.4.341'}}, indent=2) + '\n')
+          PY
+          git -C malibridge rev-parse HEAD > stage/build-info/source-revision.txt
+          git -C malibridge ls-tree HEAD client/wsi.h client/wsi.c client/wsi_wayland.c \
+            CMakeLists.txt common/gen/vkb_gen_client.c third_party/Vulkan-Headers-1.4.341 \
+            > stage/build-info/source-blobs.txt
+          dpkg-query -W > stage/build-info/build-packages.txt
+          cp patches/malibridge/malibridge-format-capacity-patch.py \
+             patches/malibridge/malibridge-wsi-lifecycle-patch.py \
+             patches/malibridge/malibridge-wl-gone-patch.py \
+             patches/malibridge/malibridge-hook2-patch.py \
+             patches/malibridge/malibridge-wl-gone-shim.c stage/build-info/
+          printf '%s\n' "$VARIANT" > stage/build-info/variant.txt
+          rm -f "malibridge-$VARIANT-aarch64.tar.zst" SHA256SUMS
+          tar --zstd -cf "malibridge-$VARIANT-aarch64.tar.zst" -C stage .
+          sha256sum "malibridge-$VARIANT-aarch64.tar.zst" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload the client artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: malibridge-${{ matrix.variant }}-aarch64
+          path: |
+            malibridge-${{ matrix.variant }}-aarch64.tar.zst
+            SHA256SUMS
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: malibridge-${{ matrix.variant }}-build-logs
+          path: |
+            stage/build-info/
+            mb-build/CMakeFiles/CMakeConfigureLog.yaml
+            mb-build/CMakeCache.txt
+
+  server:
+    name: server
+    if: ${{ inputs.server }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the kit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git ca-certificates python3 curl unzip zstd \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu
+
+      - name: Fetch the pinned MaliBridge source and check the patch pre-state
+        run: |
+          set -euo pipefail
+          mkdir -p stage/build-info
+          git init malibridge
+          git -C malibridge remote add origin "$MB_REPO"
+          git -C malibridge fetch --depth 1 origin "$MB_REVISION"
+          git -C malibridge checkout --detach FETCH_HEAD
+          test "$(git -C malibridge rev-parse HEAD)" = "$MB_REVISION"
+          test "$(git -C malibridge rev-parse HEAD:third_party/Vulkan-Headers-1.4.341)" = "$VULKAN_HEADERS_TREE"
+          test -f malibridge/common/gen/vkb_gen_server.c
+          python3 -I patches/malibridge/malibridge-mem-budget-patch.py --check malibridge \
+            | tee stage/build-info/patch-preflight.txt
+
+      - name: Apply the server patch
+        run: |
+          set -euo pipefail
+          python3 -I patches/malibridge/malibridge-mem-budget-patch.py malibridge \
+            | tee stage/build-info/patch-applied.txt
+          python3 -I patches/malibridge/malibridge-mem-budget-patch.py --verify-candidate malibridge
+          git -C malibridge diff --check
+          git -C malibridge diff > stage/build-info/candidate.patch
+          test -s stage/build-info/candidate.patch
+
+      - name: Fetch the Android NDK
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 5 -o ndk.zip \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          mkdir ndk
+          unzip -q ndk.zip -d ndk
+          echo "NDK=$PWD/ndk/android-ndk-r27c" >> "$GITHUB_ENV"
+
+      - name: Build the Android arm64-v8a server
+        run: |
+          set -euo pipefail
+          cmake -S malibridge -B mb-build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
+            -DCMAKE_BUILD_TYPE=Release
+          cp mb-build/CMakeCache.txt stage/build-info/
+          cmake --build mb-build --target vkbridge_server --parallel 4 \
+            | tee stage/build-info/build.log
+          cp mb-build/libvkbridge_server.so stage/vkbridge-server
+          chmod 755 stage/vkbridge-server
+
+      - name: Verify and package
+        run: |
+          set -euo pipefail
+          readelf -h stage/vkbridge-server | tee stage/build-info/elf.txt | grep 'Machine:.*AArch64'
+          readelf -d stage/vkbridge-server > stage/build-info/dynamic.txt
+          readelf --version-info stage/vkbridge-server > stage/build-info/symbol-versions.txt
+          readelf -l stage/vkbridge-server > stage/build-info/program-headers.txt
+          # No ldd here: the runner is x86_64, so it cannot resolve a bionic
+          # AArch64 binary's dependencies. NEEDED entries are in dynamic.txt.
+          strings stage/vkbridge-server | grep -F 'memory budget: %s for pid' \
+            > stage/build-info/budget-marker.txt
+          strings stage/vkbridge-server | grep -F 'MemAvailable is under the floor' \
+            > stage/build-info/floor-marker.txt
+          sha256sum stage/vkbridge-server > stage/build-info/server-SHA256SUMS
+          git -C malibridge rev-parse HEAD > stage/build-info/source-revision.txt
+          git -C malibridge ls-tree HEAD server/server_memory.c server/server_instance.c \
+            server/server_main.c server/vkb_server.h common/gen/vkb_gen_server.c \
+            third_party/Vulkan-Headers-1.4.341 > stage/build-info/source-blobs.txt
+          dpkg-query -W > stage/build-info/build-packages.txt
+          cp patches/malibridge/malibridge-mem-budget-patch.py stage/build-info/
+          rm -f malibridge-server-aarch64.tar.zst SHA256SUMS
+          tar --zstd -cf malibridge-server-aarch64.tar.zst -C stage .
+          sha256sum malibridge-server-aarch64.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload the server artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: malibridge-server-aarch64
+          path: |
+            malibridge-server-aarch64.tar.zst
+            SHA256SUMS
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: malibridge-server-build-logs
+          path: |
+            stage/build-info/
+            mb-build/CMakeFiles/CMakeConfigureLog.yaml
+            mb-build/CMakeCache.txt
