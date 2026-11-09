@@ -22,8 +22,14 @@ ID 不匹配时 MIUI 直接跳过该设备，这些键全部失效。
 
 ```
 patches/0001-xiaomi-15d9-00a3-identity.patch   虚拟设备身份改写（唯一改动）
-config/config.conf                             默认映射：Fn+数字→F1–F12、启动器
+config/config.conf                             默认方案全透传 + Anland 方案（顶排→F1–F12、Fn 层系统键）
 ```
+
+**Anland 侧必须同步**：Anland 判断"是否安装 Gold"时硬编码上游身份
+`0xffff:0xffff`（Java `GoldKeyboard.java` 与 native `input_grab.c`）。本设备
+定制后虚拟身份是 `15d9:00a3`，因此 Anland 需要按
+`collegeming/anland` 的 `gold-identity-15d9` 分支（同时接受两种身份）重新
+编译安装，否则设置里的 Gold 输入源不可选。
 
 ## 构建
 
