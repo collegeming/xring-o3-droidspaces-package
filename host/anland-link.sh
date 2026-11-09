@@ -31,13 +31,16 @@ load_key() {
     return 0
 }
 
-for _key in CTR SRV ANLAND_LINK DROIDSPACES_DIR; do
+for _key in CTR SRV ANLAND_LINK ANLAND_LATEST_LINK DROIDSPACES_DIR; do
     load_key "$_key"
 done
 
 : "${CTR:=archniri}"
 : "${SRV:=/data/local/tmp/xring-o3-host}"
 : "${ANLAND_LINK:=/data/local/tmp/$CTR-display.sock}"
+# 与容器编号无关的稳定别名：Anland app 内固定填它，每次迭代部署后由本脚本
+# 重指到当前容器的真实 socket，app 设置不用再改。
+: "${ANLAND_LATEST_LINK:=/data/local/tmp/archniri-latest-display.sock}"
 : "${DROIDSPACES_DIR:=/data/local/Droidspaces}"
 
 PIDS_DIR=$DROIDSPACES_DIR/Pids
@@ -63,21 +66,30 @@ mtime_of() {
     printf '%s' "$_m"
 }
 
-check_alias() {
-    if [ ! -L "$ANLAND_LINK" ]; then
-        log "FAIL $ANLAND_LINK 不存在或不是符号链接。"
+check_one_alias() {
+    _link=$1
+    if [ ! -L "$_link" ]; then
+        log "FAIL $_link 不存在或不是符号链接。"
         return 1
     fi
-    _target=$(readlink "$ANLAND_LINK" 2>/dev/null || true)
+    _target=$(readlink "$_link" 2>/dev/null || true)
     if [ -z "$_target" ]; then
-        log "FAIL $ANLAND_LINK 无法读取链接目标。"
+        log "FAIL $_link 无法读取链接目标。"
         return 1
     fi
     if ! is_live_socket "$_target"; then
-        log "FAIL $ANLAND_LINK -> $_target 不是活跃 socket。"
+        log "FAIL $_link -> $_target 不是活跃 socket。"
         return 1
     fi
-    log "PASS $ANLAND_LINK -> $_target"
+    log "PASS $_link -> $_target"
+    return 0
+}
+
+check_alias() {
+    check_one_alias "$ANLAND_LINK" || return 1
+    if [ -n "${ANLAND_LATEST_LINK:-}" ] && [ "$ANLAND_LATEST_LINK" != "$ANLAND_LINK" ]; then
+        check_one_alias "$ANLAND_LATEST_LINK" || return 1
+    fi
     return 0
 }
 
@@ -93,8 +105,10 @@ case "${1:-}" in
 
 默认行为：解析当前容器的真实 Anland socket，校验其处于 LISTEN 状态，
 然后原子替换稳定别名 $ANLAND_LINK，并打印目标路径。
+同时把与容器编号无关的 latest 别名 $ANLAND_LATEST_LINK 指向同一目标，
+供 Anland app 内固定配置（迭代换容器后 app 设置无需修改）。
 
-  --check   只校验现有别名，不修改任何文件
+  --check   只校验现有别名（两个都查），不修改任何文件
   --help    显示本帮助
 
 解析顺序：
@@ -172,3 +186,22 @@ fi
 
 log "已更新（来源：$SOURCE）"
 log "$ANLAND_LINK -> $TARGET"
+
+# 同步维护“latest”稳定别名（Anland app 内的 socket 设置固定用它）。
+if [ -n "${ANLAND_LATEST_LINK:-}" ] && [ "$ANLAND_LATEST_LINK" != "$ANLAND_LINK" ]; then
+    if [ -d "$ANLAND_LATEST_LINK" ]; then
+        die "$ANLAND_LATEST_LINK 解析为目录；拒绝替换。"
+    fi
+    if [ -e "$ANLAND_LATEST_LINK" ] && [ ! -L "$ANLAND_LATEST_LINK" ]; then
+        die "$ANLAND_LATEST_LINK 已存在且不是符号链接；拒绝替换。"
+    fi
+    mkdir -p "$(dirname -- "$ANLAND_LATEST_LINK")" || die "无法创建 $(dirname -- "$ANLAND_LATEST_LINK")"
+    _ltmp=$ANLAND_LATEST_LINK.tmp.$$
+    ln -sfn "$TARGET" "$_ltmp" || die "无法创建临时符号链接 $_ltmp"
+    if ! mv -f "$_ltmp" "$ANLAND_LATEST_LINK"; then
+        rm -f "$_ltmp"
+        die "无法替换 $ANLAND_LATEST_LINK"
+    fi
+    log "已更新（latest 稳定别名）"
+    log "$ANLAND_LATEST_LINK -> $TARGET"
+fi
