@@ -1,0 +1,132 @@
+# 从上游 Gold Keyboard Remaps 构建本设备定制的 KSU 模块。
+#
+# 上游用 0xffff:0xffff 作虚拟键盘 VID:PID（刻意避开真实硬件），但 MIUI 只为
+# 原生键盘 15d9:00a3 启用截图/音量/亮度/勿扰等系统快捷键。这里按固定 tag 拉上游、
+# 应用 ksu-module/gold-keyboard/patches/ 下的身份补丁，再用 NDK 交叉编译并打包。
+#
+# 产物：Gold_Keyboardremaps-<ver>-yingtian.zip + .sha256
+# 发布：publish=true 时创建/更新同名 Release 并附加产物。
+name: build gold keyboard ksu
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'publish the module zip as a release'
+        type: boolean
+        default: false
+      prerelease:
+        description: 'mark that release as prerelease'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  GOLD_REPO: https://github.com/Goldzxcbug/Gold_Keyboardremaps.git
+  GOLD_SHA: 73b40145f531e1cfa6202bf84c721314c7baa1ab
+  GOLD_TAG: v1.1.1
+  ANDROID_API: "26"
+  ANDROID_PLATFORM: "35"
+  ANDROID_BUILD_TOOLS: "35.0.0"
+  NDK_VERSION: 27.2.12479018
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platforms;android-${{ env.ANDROID_PLATFORM }} build-tools;${{ env.ANDROID_BUILD_TOOLS }} ndk;${{ env.NDK_VERSION }}
+
+      - name: Check out upstream Gold Keyboard Remaps
+        uses: actions/checkout@v4
+        with:
+          repository: Goldzxcbug/Gold_Keyboardremaps
+          ref: ${{ env.GOLD_SHA }}
+          path: .upstream-gold
+
+      - name: Verify upstream pin
+        run: |
+          set -euo pipefail
+          actual=$(git -C .upstream-gold rev-parse HEAD)
+          test "$actual" = "$GOLD_SHA"
+          echo "upstream $GOLD_TAG @ $actual"
+
+      - name: Verify patch pre-state
+        run: |
+          set -euo pipefail
+          # 补丁必须能干净应用；应用前先确认它要改的行确实存在且是旧值。
+          git -C .upstream-gold apply --check \
+            "$GITHUB_WORKSPACE/ksu-module/gold-keyboard/patches/0001-xiaomi-15d9-00a3-identity.patch"
+          grep -q '^#define VIRTUAL_VENDOR 0xffff$'  .upstream-gold/fn_remap.c
+          grep -q '^#define VIRTUAL_PRODUCT 0xffff$' .upstream-gold/fn_remap.c
+
+      - name: Build module
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          GOLD_SRC: ${{ github.workspace }}/.upstream-gold
+          ANDROID_JAR: ${{ env.ANDROID_HOME }}/platforms/android-${{ env.ANDROID_PLATFORM }}/android.jar
+        run: |
+          set -euo pipefail
+          chmod +x ksu-module/gold-keyboard/build-module.sh
+          # build-module.sh 会用 GOLD_SRC 打补丁、编译、打包到 dist/。
+          "$ANDROID_HOME"/build-tools/"$ANDROID_BUILD_TOOLS"/d8 --version || true
+          ./ksu-module/gold-keyboard/build-module.sh \
+            --ndk "$ANDROID_NDK_ROOT" \
+            --out "$GITHUB_WORKSPACE/dist"
+
+      - name: Verify module contents
+        run: |
+          set -euo pipefail
+          archive=$(ls dist/Gold_Keyboardremaps-*-yingtian.zip)
+          unzip -t "$archive" >/dev/null
+          # 模块必须带上 module.prop、守护进程二进制和我们的 config.conf。
+          unzip -l "$archive" | grep -q 'module.prop'
+          unzip -l "$archive" | grep -q 'bin/fn-remap'
+          unzip -l "$archive" | grep -q 'config.conf'
+          # 二进制必须是 Android aarch64（bionic，不是 glibc）。
+          mkdir -p /tmp/mod
+          unzip -o -q "$archive" bin/fn-remap -d /tmp/mod
+          file /tmp/mod/bin/fn-remap | grep -q 'ARM aarch64'
+          file /tmp/mod/bin/fn-remap | grep -q 'Android'
+
+      - name: Upload module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gold-keyboard-ksu-yingtian
+          path: |
+            dist/Gold_Keyboardremaps-*-yingtian.zip
+            dist/Gold_Keyboardremaps-*-yingtian.zip.sha256
+          if-no-files-found: error
+
+      - name: Publish release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archive=$(ls dist/Gold_Keyboardremaps-*-yingtian.zip)
+          version=$(basename "$archive" | sed 's/^Gold_Keyboardremaps-//; s/-yingtian\.zip$//')
+          tag="gold-keyboard-ksu-v${version}-yingtian"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$archive" "$archive.sha256" --clobber
+          else
+            prerelease_flag=()
+            [ "${{ inputs.prerelease }}" = "true" ] && prerelease_flag=(--prerelease)
+            gh release create "$tag" "$archive" "$archive.sha256" \
+              --title "Gold Keyboard Remaps ${version} (yingtian)" \
+              --notes "由 \`build-gold-keyboard-ksu.yml\` 从上游 ${GOLD_TAG} 构建，应用 \`0001-xiaomi-15d9-00a3-identity.patch\`（虚拟键盘伪装 Xiaomi 15d9:00a3，MIUI 原生截图/音量/亮度快捷键可用）。" \
+              "${prerelease_flag[@]}"
+          fi

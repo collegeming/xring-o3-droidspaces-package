@@ -11,7 +11,7 @@
 #                            patches/malibridge/0001-control-socket.patch (the
 #                            budget control socket the host scripts wait for),
 #                            cross-built for Android arm64-v8a with NDK r27c
-#   host-assets              scripts/make-host-bundle.sh and ksu-module/build-module.sh
+#   host-assets              scripts/make-host-bundle.sh and ksu-module/mali-host/build-module.sh
 #                            over that server: xring-o3-mali-host-<V>.tar.zst and
 #                            xring-o3-mali-host-ksu-<V>.zip, with .sha256 sidecars
 #   publish                  (workflow_dispatch input publish) that release tag
@@ -440,7 +440,7 @@ jobs:
           # Both scripts refuse a server that is not a bionic AArch64 executable.
           bash scripts/make-host-bundle.sh --server "$SERVER" \
             --version "$HOST_BUNDLE_VERSION" --out dist
-          bash ksu-module/build-module.sh --server "$SERVER" \
+          bash ksu-module/mali-host/build-module.sh --server "$SERVER" \
             --version "$HOST_BUNDLE_VERSION" --out dist
           ls -l dist
 

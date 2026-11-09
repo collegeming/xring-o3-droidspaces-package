@@ -1,0 +1,18 @@
+diff --git a/fn_remap.c b/fn_remap.c
+index f764dbb..ff30bf1 100644
+--- a/fn_remap.c
++++ b/fn_remap.c
+@@ -76,8 +76,11 @@
+ // grabs them during immersive sessions, and streams the already-remapped evdev
+ // events to the desktop. Android receives the output again after it ungrabs.
+ // tests/test_device_identity.sh checks the native helper and app discovery.
+-#define VIRTUAL_VENDOR 0xffff
+-#define VIRTUAL_PRODUCT 0xffff
++// 本设备（Xiaomi Pad 9 Pro Max / yingtian）：原生键盘是 15d9:00a3
++// "Xiaomi Keyboard"。MIUI 只为这个 VID:PID 启用截图/音量/亮度等原生快捷键，
++// 因此虚拟设备必须伪装成它；0xffff:0xffff 时 MIUI 会跳过该设备。
++#define VIRTUAL_VENDOR 0x15d9
++#define VIRTUAL_PRODUCT 0x00a3
+ #define RETRY_DELAY_INITIAL_SECONDS 2
+ #define RETRY_DELAY_MAX_SECONDS 30
+ #define MAX_DEVICES 16

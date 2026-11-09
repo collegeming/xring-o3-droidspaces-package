@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the XRING-O3 MaliBridge host KernelSU/Magisk module zip.
 #
-# Inputs: ksu-module/ (module files and README), host/ (scripts and
+# Inputs: ksu-module/mali-host/ (module files and README), host/ (scripts and
 # host.env.example) and a bionic AArch64 vkbridge-server binary. The server is
 # not stored in this repository, so --server is required.
 #
@@ -19,8 +19,9 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-REPO_DIR=$(cd -- "$SCRIPT_DIR/.." && pwd -P)
-MOD_DIR=$REPO_DIR/ksu-module
+# 本脚本位于 ksu-module/<module>/，模块文件与脚本同级；仓库根要上两级。
+MOD_DIR=$SCRIPT_DIR
+REPO_DIR=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
 HOST_DIR=$REPO_DIR/host
 ZIP_PREFIX=xring-o3-mali-host-ksu
 
@@ -114,7 +115,7 @@ fi
 "$PYTHON_BIN" -c 'import sys' >/dev/null 2>&1 || die "PYTHON 不可用：$PYTHON_BIN"
 
 for _name in module.prop customize.sh service.sh uninstall.sh README.md; do
-    [ -e "$MOD_DIR/$_name" ] || die "ksu-module/ 缺少 $_name"
+    [ -e "$MOD_DIR/$_name" ] || die "ksu-module/mali-host/ 缺少 $_name"
 done
 for _name in start-bridge.sh stop-bridge.sh bridge-supervisor.sh anland-link.sh verify-host.sh host.env.example; do
     [ -e "$HOST_DIR/$_name" ] || die "host/ 缺少 $_name"
