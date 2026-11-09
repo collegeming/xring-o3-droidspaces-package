@@ -91,16 +91,37 @@ jobs:
         run: |
           set -euo pipefail
           archive=$(ls dist/Gold_Keyboardremaps-*-yingtian.zip)
+          # 失败时先打印现场（zip 清单 + file/readelf 识别结果）再退出，避免静默 exit 1。
+          on_err() {
+            echo "---- 校验失败，dump 现场 ----"
+            if [ -n "${archive:-}" ]; then
+              unzip -l "$archive" || true
+            fi
+            if [ -f /tmp/mod/bin/fn-remap ]; then
+              file /tmp/mod/bin/fn-remap || true
+              readelf -h /tmp/mod/bin/fn-remap || true
+              readelf -l /tmp/mod/bin/fn-remap || true
+            fi
+          }
+          trap on_err ERR
+          echo "check: zip 完整性（unzip -t）"
           unzip -t "$archive" >/dev/null
           # 模块必须带上 module.prop、守护进程二进制和我们的 config.conf。
+          echo "check: 清单含 module.prop"
           unzip -l "$archive" | grep -q 'module.prop'
+          echo "check: 清单含 bin/fn-remap"
           unzip -l "$archive" | grep -q 'bin/fn-remap'
+          echo "check: 清单含 config.conf"
           unzip -l "$archive" | grep -q 'config.conf'
           # 二进制必须是 Android aarch64（bionic，不是 glibc）。
+          # NDK clang 的 file 输出不含 "Android" 关键字（首跑即因此静默误判），
+          # 改用 readelf 直接校验 ELF 机器类型和 PT_INTERP 解释器。
           mkdir -p /tmp/mod
           unzip -o -q "$archive" bin/fn-remap -d /tmp/mod
-          file /tmp/mod/bin/fn-remap | grep -q 'ARM aarch64'
-          file /tmp/mod/bin/fn-remap | grep -q 'Android'
+          echo "check: fn-remap 机器类型 AArch64"
+          readelf -h /tmp/mod/bin/fn-remap | grep -q 'Machine:.*AArch64'
+          echo "check: fn-remap 解释器 /system/bin/linker64（bionic）"
+          readelf -l /tmp/mod/bin/fn-remap | grep -q 'Requesting program interpreter: /system/bin/linker64'
 
       - name: Upload module artifact
         uses: actions/upload-artifact@v4
