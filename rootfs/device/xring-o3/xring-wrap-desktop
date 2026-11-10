@@ -1,0 +1,72 @@
+#!/bin/sh
+# xring-wrap-desktop: 让桌面条目的启动方式与命令行启动一致地进入
+# Wayland/GPU/零拷贝路径。
+#
+# 只有必须注入 per-app 参数/库的 Web 引擎类需要套 zc-run：
+#   chromium / webkit / gecko / flutter
+# GTK3/GTK4/Qt/GLFW 只依赖会话环境，保持原样，避免无谓的包装层。
+#
+# 包装保留原 Exec 文本（含 %U/%F 字段码），并且是幂等的；可在每次 pacman
+# 事务后重复执行。绝对路径位于 /opt 的 Electron/WebKit 应用同时生成
+# /usr/local/bin/<名字> 垫片，保证终端里直接敲命令也走同一路径。
+set -u
+
+CLASSIFY=${ZC_CLASSIFY:-/opt/mali-stack/current/lib/zc-run/zc-classify}
+ZC_RUN=/usr/local/bin/zc-run
+BINDIR=/usr/local/bin
+
+wrap_one() {
+    f=$1
+    [ -f "$f" ] || return 0
+    line=$(grep -m1 '^Exec=' "$f" 2>/dev/null) || return 0
+    cmd=${line#Exec=}
+    case $cmd in *zc-run*) return 0 ;; esac
+
+    # shellcheck disable=SC2086
+    probe=$(printf '%s' "$cmd" | sed 's/ *%[a-zA-Z]//g')
+    bin=$(printf '%s' "$probe" | awk '{print $1}')
+    case $bin in
+        /*) ;;
+        *) bin=$(command -v "$bin" 2>/dev/null) || return 0 ;;
+    esac
+    [ -x "$bin" ] || return 0
+
+    # 已经是调用 zc-run 的包装脚本时不再套一层。
+    if [ -f "$bin" ] && head -c 4096 "$bin" 2>/dev/null | grep -q 'zc-run'; then
+        return 0
+    fi
+
+    cls=$("$CLASSIFY" "$bin" 2>/dev/null) || return 0
+    case $cls in
+        chromium|webkit|gecko|flutter) ;;
+        *) return 0 ;;
+    esac
+
+    tmp=$(mktemp) || return 0
+    awk -v new="Exec=$ZC_RUN --class $cls $cmd" \
+        'BEGIN{done=0} /^Exec=/{if(!done){print new; done=1; next}} {print}' \
+        "$f" > "$tmp" && cat "$tmp" > "$f"
+    rm -f "$tmp"
+    echo "wrapped [$cls]: $f"
+
+    base=$(basename -- "$bin")
+    case $bin in
+        /opt/*)
+            if [ ! -e "$BINDIR/$base" ]; then
+                tmp2=$(mktemp) || return 0
+                printf '#!/bin/sh\nexec %s --class %s %s "$@"\n' \
+                    "$ZC_RUN" "$cls" "$bin" > "$tmp2"
+                install -m 0755 "$tmp2" "$BINDIR/$base" &&
+                    echo "path shim: $BINDIR/$base"
+                rm -f "$tmp2"
+            fi
+            ;;
+    esac
+}
+
+if [ "$#" -eq 0 ]; then
+    set -- /usr/share/applications/*.desktop
+fi
+for f in "$@"; do
+    wrap_one "$f"
+done

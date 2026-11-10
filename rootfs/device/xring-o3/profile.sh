@@ -239,12 +239,46 @@ xring_o3_validate_desktop_unit() {
     printf 'desktop-session bridge gate: %s\n' "$unit"
 }
 
+# 桌面入口通用化：Web 引擎类应用必须带 ozone/libdrm 注入，其他 toolkit 只吃
+# 会话环境。包装器 + pacman hook 保证“以后从任何入口安装/启动”都一致；同时
+# 写 environment.d，让 systemd --user / D-Bus 激活也能拿到 GPU 环境。
+xring_o3_install_desktop_wrap() {
+    local src="${XRING_O3_PROFILE_LIB_DIR}/xring-wrap-desktop"
+    local hook="${XRING_O3_PROFILE_LIB_DIR}/xring-desktop-wrap.hook"
+
+    if [[ -r "$src" ]]; then
+        install -m 0755 -- "$src" /usr/local/bin/xring-wrap-desktop
+        if [[ -r "$hook" ]]; then
+            install -d -m 0755 /etc/pacman.d/hooks
+            install -m 0644 -- "$hook" /etc/pacman.d/hooks/95-xring-desktop-wrap.hook
+        fi
+        # 镜像构建时已存在的条目先扫一遍；hook 负责后续安装/升级。
+        /usr/local/bin/xring-wrap-desktop >/dev/null 2>&1 || true
+    fi
+
+    install -d -m 0755 /etc/environment.d
+    cat > /etc/environment.d/90-xring-gpu.conf <<EOF
+MESA_LOADER_DRIVER_OVERRIDE=zink
+GALLIUM_DRIVER=zink
+LIBGL_KOPPER_DISABLE=false
+VK_DRIVER_FILES=${XRING_O3_MALI_ICD}
+VKBRIDGE_SOCKET=${XRING_O3_BRIDGE_SOCKET}
+GDK_BACKEND=wayland
+QT_QPA_PLATFORM=wayland
+WEBKIT_WEB_RENDER_DEVICE_FILE=${XRING_O3_DRM_DEVICE}
+WEBKIT_DMABUF_RENDERER_DISABLE_GBM=1
+WEBKIT_DISABLE_DMABUF_RENDERER=0
+EOF
+    echo 'desktop wrap: /usr/local/bin/xring-wrap-desktop + hook + environment.d'
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 case "${1:-}" in
     --install)
         xring_o3_install_marker || exit 1
         xring_o3_link_wait_bridge || exit 1
         xring_o3_install_session_gpu_env || exit 1
+        xring_o3_install_desktop_wrap
         xring_o3_validate_desktop_unit
         ;;
     --show)

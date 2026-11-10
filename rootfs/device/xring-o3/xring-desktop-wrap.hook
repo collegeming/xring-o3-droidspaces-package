@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/share/applications/*.desktop
+
+[Action]
+Description = Wrapping Web-engine desktop entries with zc-run (Wayland/GPU/zero-copy)...
+When = PostTransaction
+Exec = /usr/local/bin/xring-wrap-desktop

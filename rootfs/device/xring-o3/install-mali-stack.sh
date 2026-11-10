@@ -483,6 +483,38 @@ link_kopper_candidate_view() {
     [[ -f "$view/usr/lib/libEGL_mesa.so.0" ]] || die "kopper 兼容视图无效：$view/usr/lib"
 }
 
+# 统一 Mesa：niri / zc-run 走 mesa/kopper，而 Noctalia 与
+# mesa/default-egl-vendor.json 走 mesa/candidate。bundle v2 里两者是不同构建
+# （libgallium 不同、扩展不同），运行时表现为“同一桌面里两套 Mesa”，并使
+# Noctalia 派生的子进程在混合符号上崩溃。保留 dt-retire 载荷做回滚副本，
+# 把 mesa/candidate 指向 kopper 的同一份库，所有消费者从此读同一棵 Mesa。
+link_candidate_to_kopper() {
+    local version_dir="$1"
+    local candle="$version_dir/mesa/candidate"
+    local kopper_view="$version_dir/mesa/kopper/candidate"
+    local backup="$version_dir/mesa/candidate.dt-retire"
+
+    [[ "${BUNDLE_LAYOUT:-v1}" == "v2" ]] || return 0
+    [[ -f "$kopper_view/usr/lib/libEGL_mesa.so.0" ]] ||
+        die "kopper 视图不可用，无法统一 Mesa：$kopper_view/usr/lib"
+
+    if [[ -L "$candle" ]]; then
+        [[ "$(readlink -- "$candle")" == "kopper/candidate" ]] && return 0
+        rm -f -- "$candle"
+    elif [[ -e "$candle" ]]; then
+        if [[ -e "$backup" ]]; then
+            rm -rf -- "$candle"
+        else
+            mv -- "$candle" "$backup"
+        fi
+    fi
+
+    ln -s -- kopper/candidate "$candle"
+    [[ -f "$candle/usr/lib/libEGL_mesa.so.0" ]] ||
+        die "Mesa 统一失败：$candle/usr/lib"
+    log "已统一 Mesa：mesa/candidate -> kopper/candidate（dt-retire 副本：$backup）"
+}
+
 generate_stack_config() {
     local version_dir="$1" current="$XRING_O3_MALI_STACK_CURRENT" layout="${BUNDLE_LAYOUT:-v1}"
     install -d -m 0755 "$version_dir/conf"
@@ -507,6 +539,7 @@ EOF
     write_egl_vendor_json "$version_dir/mesa/kopper/default-egl-vendor.json" \
         "${current}/mesa/kopper/usr/lib/libEGL_mesa.so.0"
     link_kopper_candidate_view "$version_dir"
+    link_candidate_to_kopper "$version_dir"
 
     # zc-run / Chrome / DBX chain: kopper-retire Mesa + format-capacity client.
     cat > "$version_dir/conf/zc-env.conf" <<EOF
