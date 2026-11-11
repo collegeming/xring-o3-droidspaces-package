@@ -24,9 +24,9 @@ permissions:
   contents: write
 
 env:
-  GOLD_REPO: https://github.com/collegeming/Gold_Keyboardremaps.git
-  GOLD_SHA: af2c89bec1ded1e4e1dea58c84c025a4738ae3da
-  GOLD_TAG: v1.1.1-ledfix
+  GOLD_REPO: https://github.com/Goldzxcbug/Gold_Keyboardremaps.git
+  GOLD_SHA: 73b40145f531e1cfa6202bf84c721314c7baa1ab
+  GOLD_TAG: v1.1.1
   ANDROID_API: "26"
   ANDROID_PLATFORM: "35"
   ANDROID_BUILD_TOOLS: "35.0.0"
@@ -53,7 +53,7 @@ jobs:
       - name: Check out upstream Gold Keyboard Remaps
         uses: actions/checkout@v4
         with:
-          repository: collegeming/Gold_Keyboardremaps
+          repository: Goldzxcbug/Gold_Keyboardremaps
           ref: ${{ env.GOLD_SHA }}
           path: .upstream-gold
 
@@ -78,6 +78,9 @@ jobs:
           ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
           GOLD_SRC: ${{ github.workspace }}/.upstream-gold
           ANDROID_JAR: ${{ env.ANDROID_HOME }}/platforms/android-${{ env.ANDROID_PLATFORM }}/android.jar
+          UPSTREAM_REPO: ${{ env.GOLD_REPO }}
+          UPSTREAM_TAG: ${{ env.GOLD_TAG }}
+          UPSTREAM_SHA: ${{ env.GOLD_SHA }}
         run: |
           set -euo pipefail
           chmod +x ksu-module/gold-keyboard/build-module.sh
