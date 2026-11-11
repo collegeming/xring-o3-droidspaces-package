@@ -24,9 +24,9 @@ permissions:
   contents: write
 
 env:
-  GOLD_REPO: https://github.com/Goldzxcbug/Gold_Keyboardremaps.git
-  GOLD_SHA: 73b40145f531e1cfa6202bf84c721314c7baa1ab
-  GOLD_TAG: v1.1.1
+  GOLD_REPO: https://github.com/collegeming/Gold_Keyboardremaps.git
+  GOLD_SHA: dd5939294886f786ccc128f39a463cfe844b2d3f
+  GOLD_TAG: v1.1.1-ledfix
   ANDROID_API: "26"
   ANDROID_PLATFORM: "35"
   ANDROID_BUILD_TOOLS: "35.0.0"
@@ -53,7 +53,7 @@ jobs:
       - name: Check out upstream Gold Keyboard Remaps
         uses: actions/checkout@v4
         with:
-          repository: Goldzxcbug/Gold_Keyboardremaps
+          repository: collegeming/Gold_Keyboardremaps
           ref: ${{ env.GOLD_SHA }}
           path: .upstream-gold
 
