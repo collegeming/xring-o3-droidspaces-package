@@ -685,6 +685,12 @@ install_stack() {
     install_compat_links
     install_noctalia_wrapper "$version_dir"
     record_version "$VERSION"
+    # profile.sh --install runs before the stack exists in the image build, so
+    # its ICD registration is skipped there. Repeat it now that current/ is
+    # valid; otherwise the system Vulkan manifest is missing from fresh images.
+    if declare -F xring_o3_install_vulkan_defaults >/dev/null 2>&1; then
+        xring_o3_install_vulkan_defaults || true
+    fi
 
     log "安装完成：$version_dir（布局 ${BUNDLE_LAYOUT:-v1}）"
     log "current -> $(readlink -f -- "$STACK_ROOT/current")"
