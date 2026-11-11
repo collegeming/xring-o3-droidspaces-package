@@ -25,7 +25,7 @@ permissions:
 
 env:
   GOLD_REPO: https://github.com/collegeming/Gold_Keyboardremaps.git
-  GOLD_SHA: dd5939294886f786ccc128f39a463cfe844b2d3f
+  GOLD_SHA: af2c89bec1ded1e4e1dea58c84c025a4738ae3da
   GOLD_TAG: v1.1.1-ledfix
   ANDROID_API: "26"
   ANDROID_PLATFORM: "35"
