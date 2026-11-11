@@ -9,11 +9,46 @@
 # 包装保留原 Exec 文本（含 %U/%F 字段码），并且是幂等的；可在每次 pacman
 # 事务后重复执行。绝对路径位于 /opt 的 Electron/WebKit 应用同时生成
 # /usr/local/bin/<名字> 垫片，保证终端里直接敲命令也走同一路径。
+#
+# 有的应用经 shell 启动脚本进入（例如 /usr/bin/snishaper 里 `cd /opt/snishaper`
+# 再 `exec ./SniShaper`）。zc-classify 只认 ELF，直接分类脚本会得到 unknown，
+# 条目就被跳过。这里跟随脚本里的 cd/exec 找到真实二进制再分类；分类结果用于
+# 决定是否包装，Exec 文本本身仍保持原样。
 set -u
 
 CLASSIFY=${ZC_CLASSIFY:-/opt/mali-stack/current/lib/zc-run/zc-classify}
 ZC_RUN=/usr/local/bin/zc-run
 BINDIR=/usr/local/bin
+
+classify_impl() {
+    _p=$1
+    _depth=$2
+    [ "$_depth" -lt 4 ] || return 1
+    _p=$(readlink -f -- "$_p" 2>/dev/null) || return 1
+    [ -f "$_p" ] || return 1
+    _c=$("$CLASSIFY" "$_p" 2>/dev/null) || _c=
+    case $_c in
+        chromium|webkit|gecko|flutter) printf '%s\n' "$_c"; return 0 ;;
+    esac
+    head -c 2 "$_p" 2>/dev/null | grep -q '#!' || return 1
+    _d=$(dirname -- "$_p")
+    _cd=$(sed -n 's/^[[:space:]]*cd[[:space:]]\{1,\}\([^ ;&]*\).*/\1/p' "$_p" 2>/dev/null | tail -n 1)
+    if [ -n "$_cd" ]; then
+        case $_cd in
+            /*) _d=$_cd ;;
+            *) _d=$_d/$_cd ;;
+        esac
+    fi
+    _t=$(sed -n 's/^[[:space:]]*exec[[:space:]]\{1,\}\([^ ;&]*\).*/\1/p' "$_p" 2>/dev/null | tail -n 1)
+    [ -n "$_t" ] || return 1
+    case $_t in
+        /*) ;;
+        *) _t=$_d/$_t ;;
+    esac
+    classify_impl "$_t" $((_depth + 1))
+}
+
+classify() { classify_impl "$1" 0; }
 
 wrap_one() {
     f=$1
@@ -36,7 +71,7 @@ wrap_one() {
         return 0
     fi
 
-    cls=$("$CLASSIFY" "$bin" 2>/dev/null) || return 0
+    cls=$(classify "$bin") || return 0
     case $cls in
         chromium|webkit|gecko|flutter) ;;
         *) return 0 ;;
