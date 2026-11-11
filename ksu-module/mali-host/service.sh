@@ -67,5 +67,14 @@ wait_for() {
     "$DEST/start-bridge.sh"
     _status=$?
     printf '[service] start-bridge.sh 退出码=%s\n' "$_status"
+
+    # 事件驱动的按容器维护：监听 Droidspaces 的 Anland socket 目录，
+    # 容器启停（socket 创建/删除）时对齐所有容器的 bridge；再补一次初始状态。
+    if [ -x "$MODDIR/bridge-event.sh" ] && [ -x "$MODDIR/bridge-reconcile.sh" ]; then
+        pgrep -f "bridge-event.sh" >/dev/null 2>&1 ||
+            setsid inotifyd "$MODDIR/bridge-event.sh" /data/local/Droidspaces/Net:nd >/dev/null 2>&1 &
+        sh "$MODDIR/bridge-reconcile.sh" || true
+        printf '[service] bridge reconciler active (event-driven)\n'
+    fi
     exit "$_status"
 } >> "$LOG" 2>&1

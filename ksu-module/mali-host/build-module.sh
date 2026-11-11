@@ -114,7 +114,7 @@ fi
 [ -n "$PYTHON_BIN" ] || die "需要 Python 3 来生成确定性 zip"
 "$PYTHON_BIN" -c 'import sys' >/dev/null 2>&1 || die "PYTHON 不可用：$PYTHON_BIN"
 
-for _name in module.prop customize.sh service.sh uninstall.sh README.md; do
+for _name in module.prop customize.sh service.sh uninstall.sh README.md bridge-event.sh bridge-reconcile.sh; do
     [ -e "$MOD_DIR/$_name" ] || die "ksu-module/mali-host/ 缺少 $_name"
 done
 for _name in start-bridge.sh stop-bridge.sh bridge-supervisor.sh anland-link.sh verify-host.sh host.env.example; do
@@ -135,7 +135,8 @@ STAGE=$WORK/module
 mkdir -p "$STAGE/payload/mbsrv"
 
 cp -f -- "$MOD_DIR/module.prop" "$MOD_DIR/customize.sh" "$MOD_DIR/service.sh" \
-         "$MOD_DIR/uninstall.sh" "$MOD_DIR/README.md" "$STAGE/"
+         "$MOD_DIR/uninstall.sh" "$MOD_DIR/README.md" \
+         "$MOD_DIR/bridge-event.sh" "$MOD_DIR/bridge-reconcile.sh" "$STAGE/"
 if [ -n "$VERSION_OVERRIDE" ]; then
     # The packaged property must name the artifact the user installs.
     awk -v version="$VERSION" -v code="$VERSION_CODE" '
