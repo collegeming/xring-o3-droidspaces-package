@@ -24,6 +24,15 @@ BRIDGE_TIMEOUT_MARKER="${XRING_O3_BRIDGE_TIMEOUT_MARKER:-/tmp/xring-o3-bridge-ti
 TIMEOUT=30
 QUIET=0
 
+# Some clients look for the bridge at $XDG_RUNTIME_DIR/vkbridge.sock when
+# VKBRIDGE_SOCKET is unset (libvulkan_droidbridge's default path). Point that
+# default at this container's socket so programs whose environment is cleaned
+# (browser GPU processes) do not need the variable.
+_xdg_rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+if [ -d "$_xdg_rt" ]; then
+    ln -sfn "$BRIDGE_SOCKET" "$_xdg_rt/vkbridge.sock" 2>/dev/null || true
+fi
+
 usage() {
     cat <<EOF
 用法: $0 [SECONDS] [--timeout SECONDS] [--quiet]

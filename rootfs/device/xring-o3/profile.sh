@@ -130,6 +130,13 @@ xring_o3_environment_assignments() {
         "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=1" \
         "WEBKIT_DISABLE_DMABUF_RENDERER=0" \
         "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1" \
+        "QTWEBENGINE_DISABLE_SANDBOX=1" \
+        "MOZ_DISABLE_CONTENT_SANDBOX=1" \
+        "MOZ_DISABLE_GMP_SANDBOX=1" \
+        "MOZ_DISABLE_RDD_SANDBOX=1" \
+        "MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1" \
+        "MOZ_DISABLE_UTILITY_SANDBOX=1" \
+        "MOZ_SHM_NO_SEALS=1" \
         "GDK_BACKEND=wayland" \
         "ZC_PREFIX=${XRING_O3_MALI_STACK_CURRENT}" \
         "ZC_CLASSIFY=${XRING_O3_MALI_STACK_CURRENT}/lib/zc-run/zc-classify"
@@ -270,8 +277,44 @@ WEBKIT_WEB_RENDER_DEVICE_FILE=${XRING_O3_DRM_DEVICE}
 WEBKIT_DMABUF_RENDERER_DISABLE_GBM=1
 WEBKIT_DISABLE_DMABUF_RENDERER=0
 WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+QTWEBENGINE_DISABLE_SANDBOX=1
+MOZ_DISABLE_CONTENT_SANDBOX=1
+MOZ_DISABLE_GMP_SANDBOX=1
+MOZ_DISABLE_RDD_SANDBOX=1
+MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
+MOZ_DISABLE_UTILITY_SANDBOX=1
+MOZ_SHM_NO_SEALS=1
 EOF
     echo 'desktop wrap: /usr/local/bin/xring-wrap-desktop + hook + environment.d'
+}
+
+# Register the bridge ICD in the Vulkan loader's default directory. Programs
+# started with a cleaned environment (or without xring's own wrappers) then
+# enumerate the Mali device without VK_DRIVER_FILES/VK_ICD_FILENAMES. The
+# manifest's library_path is written absolute: a relative path in a symlinked
+# manifest is ambiguous across loader versions.
+xring_o3_install_vulkan_defaults() {
+    local icd="$XRING_O3_MALI_ICD" lib api out=/usr/share/vulkan/icd.d/90-droidbridge.json
+    if [[ ! -r "$icd" ]]; then
+        echo "vulkan defaults: missing $icd; skipped"
+        return 0
+    fi
+    lib=$(sed -n 's/.*"library_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$icd" | head -n 1 | sed 's|\\/|/|g')
+    api=$(sed -n 's/.*"api_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$icd" | head -n 1)
+    case $lib in
+        '') echo "vulkan defaults: $icd has no library_path; skipped"; return 0 ;;
+        /*) ;;
+        *) lib="$(dirname -- "$icd")/$lib" ;;
+    esac
+    if [[ ! -r "$lib" ]]; then
+        echo "vulkan defaults: $icd points at unreadable $lib; skipped"
+        return 0
+    fi
+    install -d -m 0755 "$(dirname -- "$out")"
+    printf '{"file_format_version":"1.0.0","ICD":{"library_path":"%s","api_version":"%s"}}\n' \
+        "$lib" "${api:-1.4.0}" >"$out"
+    chmod 0644 "$out"
+    echo "vulkan defaults: $out -> $lib"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -281,6 +324,7 @@ case "${1:-}" in
         xring_o3_link_wait_bridge || exit 1
         xring_o3_install_session_gpu_env || exit 1
         xring_o3_install_desktop_wrap
+        xring_o3_install_vulkan_defaults
         xring_o3_validate_desktop_unit
         ;;
     --show)
