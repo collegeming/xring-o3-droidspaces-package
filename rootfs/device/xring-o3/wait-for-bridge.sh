@@ -17,6 +17,10 @@ set -u
 
 BRIDGE_SOCKET="${XRING_O3_BRIDGE_SOCKET:-/opt/mb-sock/mali.sock}"
 CONTROL_SOCKET="${XRING_O3_BRIDGE_CONTROL_SOCKET:-/opt/mb-sock/control.sock}"
+# Written when the wait times out, cleared on success. The Android host
+# reconciler watches it and restarts desktop-session once the bridge appears,
+# so a session that started without a renderer recovers without manual help.
+BRIDGE_TIMEOUT_MARKER="${XRING_O3_BRIDGE_TIMEOUT_MARKER:-/tmp/xring-o3-bridge-timeout}"
 TIMEOUT=30
 QUIET=0
 
@@ -127,6 +131,7 @@ $CONTROL_SOCKET"
             printf '[wait-for-mali-bridge] 就绪：%s、%s（%s 秒内）\n' \
                 "$BRIDGE_SOCKET" "$CONTROL_SOCKET" "$((tick / ticks_per_second))"
         fi
+        rm -f "$BRIDGE_TIMEOUT_MARKER" 2>/dev/null || true
         exit 0
     fi
 
@@ -142,6 +147,12 @@ $CONTROL_SOCKET"
     sleep "$poll_delay"
     tick=$((tick + 1))
 done
+
+# Record the timeout before letting the session start: desktop-session will
+# come up without a renderer, and the host reconciler uses this marker to
+# restart it after the bridge becomes available.
+mkdir -p "$(dirname -- "$BRIDGE_TIMEOUT_MARKER")" 2>/dev/null || true
+printf '%s\n' "$(date +%s 2>/dev/null || echo unknown)" >"$BRIDGE_TIMEOUT_MARKER" 2>/dev/null || true
 
 printf '%s\n' \
     "[wait-for-mali-bridge] 警告: ${TIMEOUT} 秒内未就绪：$(printf '%s' "$missing" | tr '\n' ' ')" \
