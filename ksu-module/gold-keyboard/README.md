@@ -21,7 +21,8 @@ ID 不匹配时 MIUI 直接跳过该设备，这些键全部失效。
 副本（避免和上游分叉后长期失同步）。
 
 ```
-patches/0001-xiaomi-15d9-00a3-identity.patch   虚拟设备身份改写（唯一改动）
+patches/0001-xiaomi-15d9-00a3-identity.patch   虚拟设备身份改写
+patches/0002-android-system-key-output.patch   Android 系统键的第二条输出通道
 config/config.conf                             默认方案全透传 + Anland 方案（顶排→F1–F12、Fn 层系统键）
 ```
 
@@ -67,8 +68,31 @@ Anland 沉浸式模式要抓取按键转发给容器桌面。默认输入源 `di
 键盘经 Gold 的虚拟设备。切换后：
 
 - Anland 进入沉浸式 → 写 `/data/adb/modules/Gold_Keyboardremaps/anland-profile`
-  → Gold 每秒轮询到该文件 → 切到 Anland 配置（顶排 `F1`–`F12`，`Fn`+键出原键）
+  → Gold 每秒轮询到该文件 → 切到 Anland 配置（顶排 `F1`–`F12`，`Fn`+键出原生系统键）
 - 退出沉浸式 → 删除该文件 → Gold 回到默认直通，Android 原生快捷键恢复
+
+### 两条输出通道
+
+沉浸式下 Anland 会 grab 所有以 `Gold Keyboardremaps` 开头的虚拟键盘，把事件转发
+给容器。因此“顶排→F1–F12”和“Fn 层→系统键”不能写到同一个节点：
+
+| 规则前缀 | 输出节点 | 谁收到 |
+|---|---|---|
+| `mapping=` | `Gold Keyboardremaps eventN`（`15d9:00a3`） | Anland grab → 容器桌面 |
+| `android_mapping=` | `Xiaomi Keyboard SysKeys`（`15d9:00a3`） | Android / MIUI 原生处理 |
+
+`Xiaomi Keyboard SysKeys` 由 0002 补丁创建，只有配置里出现 `android_mapping=`
+时才建立。它同时满足三个条件：
+
+- 名字不以 `Gold Keyboardremaps` 开头。Anland 判断 Gold 输出时同时看名字前缀与
+  `ffff:ffff` / `15d9:00a3` 身份，前缀不符就不会当成 Gold。
+- 不声明字母键。Anland 把“无字母的键盘”归为按键簇，不 grab；combined 输入源也
+  会跳过这类节点。
+- VID:PID 仍是 `15d9:00a3`。MIUI 的原生快捷键判定只看这两个 ID。
+
+因此 Fn 层的码能回到 Android，由 MIUI 执行截图/音量/亮度/勿扰/小爱等原生逻辑；
+顶排的改写码则全部进入容器。若把 Fn 层也写成 `mapping=`，这些键会被 Anland 送进
+容器，niri 不认识、Android 也收不到——表现为 Fn 组合键完全没反应。
 
 ## 已验证按键（伪装 `15d9:00a3` 后）
 
@@ -83,6 +107,12 @@ Anland 沉浸式模式要抓取按键转发给容器桌面。默认输入源 `di
 
 注意：`120` 是 `KEY_RECENTAPPS`（不是 SYSRQ），会打开最近任务。
 `0xffff:0xffff` + `99` 完全无反应，是这套 patch 存在的直接证据。
+
+以上是 Android 直通（默认方案）下的行为。沉浸式下的两条输出通道另做端到端验证：
+`KEY_F2` 经 `android_mapping` 在 `Xiaomi Keyboard SysKeys` 上发出
+`KEY_BRIGHTNESSUP`，`Display Brightness` 由 0.0384 升到 0.1144；`KEY_F4` 发出
+`KEY_SYSRQ`，生成 MIUI 原生截图；`KEY_BRIGHTNESSDOWN` 经 `mapping` 在
+`Gold Keyboardremaps` 上发出 `KEY_F1`。
 
 ## 依赖与风险
 

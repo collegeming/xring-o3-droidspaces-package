@@ -67,11 +67,18 @@ jobs:
       - name: Verify patch pre-state
         run: |
           set -euo pipefail
-          # 补丁必须能干净应用；应用前先确认它要改的行确实存在且是旧值。
-          git -C .upstream-gold apply --check \
-            "$GITHUB_WORKSPACE/ksu-module/gold-keyboard/patches/0001-xiaomi-15d9-00a3-identity.patch"
+          # 身份常量仍是上游旧值：0001 的全部意义就是把它改掉。
           grep -q '^#define VIRTUAL_VENDOR 0xffff$'  .upstream-gold/fn_remap.c
           grep -q '^#define VIRTUAL_PRODUCT 0xffff$' .upstream-gold/fn_remap.c
+          # 按文件名顺序预演一次：补丁之间有先后依赖（0002 基于 0001 之后的文件），
+          # 逐个 --check 不足以发现顺序问题。build-module.sh 随后在自己的副本里重做。
+          work=$(mktemp -d)
+          cp -a .upstream-gold/. "$work/"
+          for patch in ksu-module/gold-keyboard/patches/*.patch; do
+            git -C "$work" apply --check "$GITHUB_WORKSPACE/$patch"
+            git -C "$work" apply "$GITHUB_WORKSPACE/$patch"
+          done
+          rm -rf "$work"
 
       - name: Build module
         env:
@@ -151,6 +158,6 @@ jobs:
             [ "${{ inputs.prerelease }}" = "true" ] && prerelease_flag=(--prerelease)
             gh release create "$tag" "$archive" "$archive.sha256" \
               --title "Gold Keyboard Remaps ${version} (yingtian)" \
-              --notes "由 \`build-gold-keyboard-ksu.yml\` 从上游 ${GOLD_TAG} 构建，应用 \`0001-xiaomi-15d9-00a3-identity.patch\`（虚拟键盘伪装 Xiaomi 15d9:00a3，MIUI 原生截图/音量/亮度快捷键可用）。" \
+              --notes "由 \`build-gold-keyboard-ksu.yml\` 从上游 ${GOLD_TAG} 构建，应用 \`patches/\` 下的补丁（虚拟键盘伪装 Xiaomi 15d9:00a3；Android 系统键另走独立输出节点，沉浸模式下 Fn 层仍可触发 MIUI 原生截图/音量/亮度快捷键）。" \
               "${prerelease_flag[@]}"
           fi
