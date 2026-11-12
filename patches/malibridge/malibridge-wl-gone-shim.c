@@ -25,6 +25,12 @@
  * the shim finds the loaded object by path in /proc/self/maps and dlsym()s that handle, with
  * RTLD_NOLOAD so a second copy is never loaded. Without the hook (another ICD, another driver) the
  * shim is a pass-through: only a destroy request takes the extra check.
+ *
+ * The preload is scoped to the process that needs the hook. A desktop shell (Noctalia) is started
+ * with this library in LD_PRELOAD and hands its whole environment to every application it spawns;
+ * JBR's Wayland toolkit (IntelliJ, PyCharm, ...) dereferences a null proxy inside this trampoline
+ * while WLToolkit.initIDs() runs, so it never opens a window. The constructor therefore strips our
+ * own entry from LD_PRELOAD: this process keeps the hook, its children get a clean environment.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -62,6 +68,61 @@ static int trace_on(void)
         v = e && *e && strcmp(e, "0") != 0;
     }
     return v;
+}
+
+/* Drop our own entry from LD_PRELOAD: the hook belongs to this process, not to the applications
+ * it spawns. The list is copied first because setenv()/unsetenv() may move environ. Entries are
+ * separated by ':' or whitespace; a bare soname and a full path are both recognised. */
+static int vkb_wl_is_own_entry(const char *entry, size_t len)
+{
+    const char *base = entry;
+    size_t i;
+
+    for (i = 0; i < len; i++)
+        if (entry[i] == '/') base = entry + i + 1;
+    size_t base_len = len - (size_t)(base - entry);
+    return base_len == sizeof("libvkb_wl_gone.so") - 1 &&
+           memcmp(base, "libvkb_wl_gone.so", base_len) == 0;
+}
+
+static void vkb_wl_strip_preload(void)
+{
+    const char *cur = getenv("LD_PRELOAD");
+    char *copy, *kept, *p;
+    size_t out = 0;
+    int entries = 0;
+
+    if (!cur || !*cur) return;
+    copy = strdup(cur);
+    if (!copy) return;
+    kept = malloc(strlen(cur) + 1);
+    if (!kept) {
+        free(copy);
+        return;
+    }
+
+    p = copy;
+    while (*p) {
+        char *start;
+        size_t len;
+        while (*p == ':' || *p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        start = p;
+        while (*p && *p != ':' && *p != ' ' && *p != '\t') p++;
+        len = (size_t)(p - start);
+        if (vkb_wl_is_own_entry(start, len)) continue;
+        if (entries++) kept[out++] = ' ';
+        memcpy(kept + out, start, len);
+        out += len;
+    }
+    kept[out] = '\0';
+    if (entries) {
+        setenv("LD_PRELOAD", kept, 1);
+    } else {
+        unsetenv("LD_PRELOAD");
+    }
+    free(kept);
+    free(copy);
 }
 
 /* Our imports, and the ICD's hook if it is loaded. Retried a few times, because a surface can be
@@ -130,6 +191,7 @@ static void summary(void)
 
 __attribute__((constructor)) static void vkb_wl_init(void)
 {
+    vkb_wl_strip_preload(); /* this process only: children must not inherit the hook */
     vkb_wl_resolve();
     atexit(summary);
 }
