@@ -285,4 +285,4 @@ ls -l /opt/mb-sock/mali.sock /opt/mb-sock/control.sock
 | [YaLTeR/niri](https://github.com/YaLTeR/niri) / [Noctalia](https://github.com/noctalia-dev/noctalia) | 合成器与桌面 shell |
 | [Goldzxcbug/Droidspaces-rootfs-Desktop-builder](https://github.com/Goldzxcbug/Droidspaces-rootfs-Desktop-builder) | builder 上游模板 |
 
-本仓库不复制上游源码；设备补丁、打包脚本、宿主脚本和验证口径在这里，完整源码与发布产物以对应上游和 Releases 为准。
+本仓库不复制上游源码；设备补丁、打包脚本、宿主脚本和验证口径在这里，完整源码与发布产物以对应上游和 Releases 为准。设备运行日志、容器/镜像归档、性能与功耗原始数据、开发工作区的完整研究文档不在本仓库。
