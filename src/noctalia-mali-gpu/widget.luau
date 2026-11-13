@@ -5,10 +5,6 @@
 --   GPU model, frequency, temperature, bridge usage/budget, MemAvailable,
 --   client count, per-client bytes, applied total/client/floor, per-app FPS.
 --
--- mb-tray watches /run/user/1000/mb-budget-ui.plugin; while this widget runs it
--- refreshes that heartbeat, so mb-tray drops its own SNI item and the two never
--- show duplicate icons. When the plugin stops, onExit removes the heartbeat and
--- mb-tray takes over after its stale timeout.
 --
 -- Mali kbase has no usable busy counter (debugfs dvfs_utilization is frozen),
 -- so no fabricated "GPU load" percentage is shown.
@@ -20,7 +16,6 @@ local FREQ_CUR = "/sys/class/devfreq/gpufreq_core/cur_freq"
 local FREQ_MAX = "/sys/class/devfreq/gpufreq_core/max_freq"
 local REPORT_PATH = "/opt/mb-sock/malibridge-report.json"
 local MBCTL = "/opt/mali-stack/current/bin/mbctl"
-local HEARTBEAT = "/run/user/1000/mb-budget-ui.plugin"
 
 local tempPath = nil
 local tick = 0
@@ -145,12 +140,6 @@ local function refreshReport()
   end
 end
 
-local function touchHeartbeat()
-  pcall(function()
-    noctalia.writeFile(HEARTBEAT, tostring(os.time()))
-  end)
-end
-
 local function formatMhz(hz)
   if not hz then
     return "?"
@@ -177,7 +166,6 @@ findGpuTemp()
 
 function update()
   tick = tick + 1
-  touchHeartbeat()
   if tick % 15 == 1 then
     refreshBridge()
   end
@@ -239,8 +227,3 @@ function onClick()
   noctalia.togglePanel("collegeming/mali-gpu:budget")
 end
 
-function onExit()
-  pcall(function()
-    noctalia.removeFile(HEARTBEAT)
-  end)
-end

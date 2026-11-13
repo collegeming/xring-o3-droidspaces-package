@@ -9,10 +9,8 @@ Noctalia 5.x 的 Luau 插件。默认只在顶栏显示一个小图标，不显�
 - 每应用 FPS（`/opt/mb-sock/malibridge-report.json` 的 `fps_p50`）
 - 用量超过总预算时给出 WARN 行
 
-这些内容合并了旧 `mb-tray` SNI 悬浮提示的预算信息。插件运行期间会刷新
-`/run/user/1000/mb-budget-ui.plugin` 心跳；`mb-tray` 检测到心跳后自动撤下自己的
-托盘项，避免两个图标重复。插件停止时 `onExit` 删除心跳，`mb-tray` 在超时后接管，
-作为没有 Noctalia 插件时的兜底。
+这些内容合并了旧 `mb-tray` SNI 悬浮提示的预算信息。`mb-tray` 已从镜像移除，
+源码只在 xring 仓库保留作历史参考；Noctalia 插件是唯一入口。
 
 插件只读本机 sysfs/procfs 和 MaliBridge 本地 socket，不联网。
 
@@ -24,8 +22,7 @@ Noctalia 5.x 的 Luau 插件。默认只在顶栏显示一个小图标，不显�
 - 立即应用、应用并保存（`mbctl set ... --persist`）
 - 打开报告 / 打开日志
 
-面板写入仍然走 `mbctl` 和同一个 control socket；Noctalia 插件不可用时会回退到
-mb-tray 的托盘菜单。
+面板写入仍然走 `mbctl` 和同一个 control socket。
 
 
 
