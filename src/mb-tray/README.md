@@ -6,5 +6,5 @@
 - 顶栏图标悬浮显示 GPU 频率/温度、MaliBridge 预算与占用、MemAvailable、客户端占用、FPS
 - 点击图标打开预算面板：总预算/单客户端/下限预设、立即应用、应用并保存、打开报告/日志
 
-镜像构建不再安装或自启动 `mb-tray`。本目录只保留源码作为历史参考，不保证与镜像
-同步；新功能请改 `src/noctalia-mali-gpu/`。
+Arch/Noctalia 镜像不再安装或自启动 `mb-tray`；Fedora KDE 镜像仍保留它作为托盘。
+本目录只保留源码作为历史参考，不保证与镜像同步；新功能请改 `src/noctalia-mali-gpu/`。

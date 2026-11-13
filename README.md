@@ -80,10 +80,10 @@ flowchart LR
 
 **改造**：
 
-- Mali 栈 bundle：Mesa（kopper 与 dt-retire 两套）、MaliBridge 客户端（format-capacity 与 hook2 两份）、`libgbm` 垫片、`libdrmfake`、`zc-run`、`mbctl`、`budget.conf`（`mb-tray` 已废弃，镜像不再安装），统一安装到 `/opt/mali-stack/<version>`，`current` 原子切换。
+- Mali 栈 bundle：Mesa（kopper 与 dt-retire 两套）、MaliBridge 客户端（format-capacity 与 hook2 两份）、`libgbm` 垫片、`libdrmfake`、`zc-run`、`mbctl`、`budget.conf`（`mb-tray` 在 Arch/Noctalia 镜像中已废弃，Fedora KDE 仍保留），统一安装到 `/opt/mali-stack/<version>`，`current` 原子切换。
 - 系统级 Vulkan ICD：`/usr/share/vulkan/icd.d/90-droidbridge.json`，作为 `VK_DRIVER_FILES` 缺失时的兜底，让环境被清理的客户端仍能枚举到 Mali。
 - 默认 socket 链接：`$XDG_RUNTIME_DIR/vkbridge.sock` 指向容器的 `mali.sock`，浏览器沙箱清理环境后仍能找到 bridge。
-- 内存预算：默认 `total_mb=4096`、`pid_mb=2048`、`floor_mb=2048`、`map_limit=60000`，由 `mbctl` 读取和调整；`mb-tray` 已废弃。
+- 内存预算：默认 `total_mb=4096`、`pid_mb=2048`、`floor_mb=2048`、`map_limit=60000`，由 `mbctl` 读取和调整；`mb-tray` 在 Arch/Noctalia 镜像中已废弃，Fedora KDE 仍保留。
 - wl-gone shim：在 `wl_surface` 销毁前通知 ICD 标记 surface，避免 Kopper 的延迟销毁把 present 发到合成器已经遗忘的对象上。shim 在构造函数里把自己从 `LD_PRELOAD` 中剥离，只作用于承载它的进程（Noctalia），不传给子进程。
 - Anland/Smithay 补丁：Touch seat 让 niri 注册触摸设备；AFBC 线性尺寸校验避免缓冲尺寸误判。
 
@@ -239,7 +239,7 @@ niri/Smithay、Mesa、MaliBridge 都按“上游源码 + patch”构建，不维
 | `patches/malibridge/` | AFBC 导出元数据、format-capacity、hook2、内存预算、wl-gone、control socket | 3.1、3.4、3.5 |
 | `src/zc-run/` | 应用分类启动器 | 3.3 |
 | `src/libgbm-shim/`、`src/libdrmfake/` | GBM/DRM 垫片 | 3.1、3.3 |
-| `src/mbctl/`、`src/mb-tray/` | 预算控制 CLI；`mb-tray` 为已废弃的历史 SNI 托盘源码，不再安装 | 3.1 |
+| `src/mbctl/`、`src/mb-tray/` | 预算控制 CLI；`mb-tray` 为历史 SNI 托盘源码，Arch 镜像不再安装、Fedora KDE 保留 | 3.1 |
 | `scripts/` | Mali 栈/host bundle 打包与校验 | 3.8 |
 | `.github/workflows/` | 补丁验证、MaliBridge/Mesa/niri/Gold 构建 | 3.8 |
 | `docs/` | 架构、复现、整合分析 | 全篇 |
