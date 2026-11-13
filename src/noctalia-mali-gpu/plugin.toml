@@ -1,7 +1,7 @@
 id = "collegeming/mali-gpu"
 name = "Mali GPU"
-version = "1.1.0"
-plugin_api = 3
+version = "1.2.0"
+plugin_api = 9
 author = "collegeming"
 license = "MIT"
 icon = "gpu"
@@ -11,3 +11,10 @@ dependencies = []
 [[widget]]
 id = "status"
 entry = "widget.luau"
+
+[[panel]]
+id = "budget"
+entry = "panel.luau"
+width = 460
+height = 500
+position = "center"

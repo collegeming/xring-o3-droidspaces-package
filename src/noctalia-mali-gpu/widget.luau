@@ -235,6 +235,10 @@ function update()
   barWidget.setTooltip(rows)
 end
 
+function onClick()
+  noctalia.togglePanel("collegeming/mali-gpu:budget")
+end
+
 function onExit()
   pcall(function()
     noctalia.removeFile(HEARTBEAT)
