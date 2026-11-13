@@ -1,0 +1,122 @@
+name: build anland consumer apk
+
+# 从上游 SuperTurtleDev/anland 构建 Android consumer APK。
+# 不依赖任何 Anland fork：只使用上游分支/标签，产物发布到 anland-consumer-mali release。
+# 构建需要 Android SDK/NDK，由 GitHub Actions 完成；使用者只下载 release 资产。
+
+on:
+  workflow_dispatch:
+    inputs:
+      anland_ref:
+        description: 'Anland upstream branch or tag (default: legacy)'
+        required: true
+        type: string
+        default: legacy
+      publish:
+        description: 'publish the APK to the anland-consumer-mali release'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  ANLAND_REPO: https://github.com/SuperTurtleDev/anland.git
+  RELEASE_TAG: anland-consumer-mali
+  ANDROID_BUILD_TOOLS: "34.0.0"
+  NDK_VERSION: "29.0.13113456"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools build-tools;${{ env.ANDROID_BUILD_TOOLS }} ndk;${{ env.NDK_VERSION }}"
+          accept-android-sdk-licenses: true
+
+      - name: Export NDK_DIR
+        run: echo "NDK_DIR=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+
+      - name: Clone Anland upstream
+        env:
+          ANLAND_REF: ${{ inputs.anland_ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$ANLAND_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._+~/-]*$ ]] || \
+             [[ "$ANLAND_REF" == *..* ]] || [[ "$ANLAND_REF" == *'@{'* ]]; then
+            echo "unsupported anland_ref: $ANLAND_REF" >&2
+            exit 1
+          fi
+          git clone --branch "$ANLAND_REF" "$ANLAND_REPO" anland
+          commit="$(git -C anland rev-parse HEAD)"
+          echo "ANLAND_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "ANLAND_SHORT=${commit:0:8}" >> "$GITHUB_ENV"
+          echo "ANLAND_REF=$ANLAND_REF" >> "$GITHUB_ENV"
+          echo "source=$ANLAND_REPO ref=$ANLAND_REF commit=$commit"
+
+      - name: Generate debug keystore
+        run: |
+          mkdir -p "$HOME/.android"
+          keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug, O=Android, C=US" -noprompt
+
+      - name: Build plain release APK
+        working-directory: anland/consumers/anland_v5/android_consumer
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew assemblePlainRelease \
+            -Pandroid.injected.signing.store.file="$HOME/.android/debug.keystore" \
+            -Pandroid.injected.signing.store.password=android \
+            -Pandroid.injected.signing.key.alias=androiddebugkey \
+            -Pandroid.injected.signing.key.password=android
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp app/build/outputs/apk/plain/release/app-plain-release.apk \
+             "$GITHUB_WORKSPACE/dist/anland-consumer-mali.apk"
+          cd "$GITHUB_WORKSPACE/dist"
+          sha256sum anland-consumer-mali.apk > anland-consumer-mali.apk.sha256
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anland-consumer-mali-${{ env.ANLAND_SHORT }}
+          path: |
+            dist/anland-consumer-mali.apk
+            dist/anland-consumer-mali.apk.sha256
+          if-no-files-found: error
+
+      - name: Publish release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/notes.md <<EOF
+          由 \`build-anland-consumer.yml\` 从上游 ${ANLAND_REPO} 的 ${ANLAND_REF} 构建。
+
+          - 源码 commit: ${ANLAND_COMMIT}
+          - 构建方式: assemblePlainRelease（arm64-v8a），debug keystore 签名
+          - 本产物不含任何 fork 补丁；桌面端 niri 与宿主脚本见本仓库其它 release
+          EOF
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "Anland consumer APK (Mali, upstream)" --notes-file /tmp/notes.md
+            gh release upload "$RELEASE_TAG" dist/anland-consumer-mali.apk dist/anland-consumer-mali.apk.sha256 --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/anland-consumer-mali.apk dist/anland-consumer-mali.apk.sha256 \
+              --title "Anland consumer APK (Mali, upstream)" \
+              --notes-file /tmp/notes.md
+          fi
