@@ -1,16 +1,17 @@
--- mali-gpu: Noctalia bar widget for the XRING-O3 Mali GPU.
+-- mali-gpu: Noctalia bar widget for the XRING-O3 Mali GPU and MaliBridge budget.
 --
--- Data sources (all device-local, no network):
---   /sys/class/misc/mali0/device/gpuinfo         model string
---   /sys/class/devfreq/gpufreq_core/cur_freq     current GPU clock (Hz)
---   /sys/class/devfreq/gpufreq_core/max_freq     max GPU clock (Hz)
---   /sys/class/thermal/thermal_zone*/temp        gpu-ss-* temperatures (milli-C)
---   mbctl status --json                          MaliBridge budget/usage
---   /opt/mb-sock/malibridge-report.json          per-process fps_p50
+-- Default state is icon-only (no numbers). Hover shows the merged view that the
+-- old mb-tray SNI tooltip exposed:
+--   GPU model, frequency, temperature, bridge usage/budget, MemAvailable,
+--   client count, per-client bytes, applied total/client/floor, per-app FPS.
 --
--- Mali kbase does not expose a usable busy counter (debugfs dvfs_utilization
--- stays frozen/underflowed), so this widget shows frequency, temperature and
--- memory rather than a fabricated "GPU load" percentage.
+-- mb-tray watches /run/user/1000/mb-budget-ui.plugin; while this widget runs it
+-- refreshes that heartbeat, so mb-tray drops its own SNI item and the two never
+-- show duplicate icons. When the plugin stops, onExit removes the heartbeat and
+-- mb-tray takes over after its stale timeout.
+--
+-- Mali kbase has no usable busy counter (debugfs dvfs_utilization is frozen),
+-- so no fabricated "GPU load" percentage is shown.
 
 noctalia.setUpdateInterval(2000)
 
@@ -19,11 +20,20 @@ local FREQ_CUR = "/sys/class/devfreq/gpufreq_core/cur_freq"
 local FREQ_MAX = "/sys/class/devfreq/gpufreq_core/max_freq"
 local REPORT_PATH = "/opt/mb-sock/malibridge-report.json"
 local MBCTL = "/opt/mali-stack/current/bin/mbctl"
+local HEARTBEAT = "/run/user/1000/mb-budget-ui.plugin"
 
 local tempPath = nil
 local tick = 0
-local bridgeUsed = nil
-local bridgeTotal = nil
+local bridge = {
+  used = nil,
+  total = nil,
+  pid = nil,
+  floor = nil,
+  mapLimit = nil,
+  availKb = nil,
+  clientsCount = nil,
+  clients = {},
+}
 local topFps = {}
 
 local function readTrim(path)
@@ -80,13 +90,30 @@ local function refreshBridge()
       return
     end
     if type(data.usage) == "table" then
-      bridgeUsed = tonumber(data.usage.total_bytes)
+      bridge.used = tonumber(data.usage.total_bytes)
+      bridge.clients = {}
+      if type(data.usage.clients) == "table" then
+        for _, c in ipairs(data.usage.clients) do
+          local pid = tonumber(c.pid)
+          local bytes = tonumber(c.bytes)
+          if pid and bytes then
+            bridge.clients[#bridge.clients + 1] = { pid = pid, bytes = bytes }
+          end
+        end
+        table.sort(bridge.clients, function(a, b)
+          return a.bytes > b.bytes
+        end)
+      end
     end
     if type(data.budget) == "table" then
-      local mb = tonumber(data.budget.total_mb)
-      if mb then
-        bridgeTotal = mb * 1024 * 1024
-      end
+      bridge.total = tonumber(data.budget.total_mb)
+      bridge.pid = tonumber(data.budget.pid_mb)
+      bridge.floor = tonumber(data.budget.floor_mb)
+      bridge.mapLimit = tonumber(data.budget.map_limit)
+    end
+    if type(data.system) == "table" then
+      bridge.availKb = tonumber(data.system.mem_available_kb)
+      bridge.clientsCount = tonumber(data.clients_count)
     end
   end)
 end
@@ -118,6 +145,12 @@ local function refreshReport()
   end
 end
 
+local function touchHeartbeat()
+  pcall(function()
+    noctalia.writeFile(HEARTBEAT, tostring(os.time()))
+  end)
+end
+
 local function formatMhz(hz)
   if not hz then
     return "?"
@@ -125,10 +158,26 @@ local function formatMhz(hz)
   return string.format("%.0f", hz / 1000000)
 end
 
+local function gb(bytes)
+  if not bytes then
+    return "?"
+  end
+  return string.format("%.2f", bytes / 1073741824)
+end
+
+local function topClients()
+  local parts = {}
+  for i = 1, math.min(3, #bridge.clients) do
+    parts[#parts + 1] = string.format("%d:%.0fM", bridge.clients[i].pid, bridge.clients[i].bytes / 1048576)
+  end
+  return table.concat(parts, " ")
+end
+
 findGpuTemp()
 
 function update()
   tick = tick + 1
+  touchHeartbeat()
   if tick % 15 == 1 then
     refreshBridge()
   end
@@ -146,17 +195,9 @@ function update()
     end
   end
 
-  local parts = {}
-  if cur then
-    parts[#parts + 1] = formatMhz(cur) .. "M"
-  end
-  if temp then
-    parts[#parts + 1] = string.format("%.0f°", temp)
-  end
-  if #parts == 0 then
-    parts[1] = "?"
-  end
-  barWidget.setText("GPU " .. table.concat(parts, " "))
+  -- Icon-only default; the numbers live in the hover tooltip.
+  barWidget.setText("")
+  barWidget.setGlyph("cpu")
 
   local rows = {
     { key = "GPU", value = readTrim(MODEL_PATH) or "Mali GPU" },
@@ -165,14 +206,37 @@ function update()
   if temp then
     rows[#rows + 1] = { key = "Temp", value = string.format("%.1f °C", temp) }
   end
-  if bridgeUsed and bridgeTotal then
+  if bridge.used then
+    rows[#rows + 1] = { key = "Bridge", value = gb(bridge.used) .. " / " .. (bridge.total and string.format("%.1f", bridge.total / 1024) or "?") .. " G" }
+  end
+  if bridge.availKb then
+    rows[#rows + 1] = { key = "MemAvailable", value = string.format("%.0f MB", bridge.availKb / 1024) }
+  end
+  if bridge.clientsCount then
+    local value = string.format("%d", bridge.clientsCount)
+    local top = topClients()
+    if top ~= "" then
+      value = value .. " · " .. top
+    end
+    rows[#rows + 1] = { key = "Clients", value = value }
+  end
+  if bridge.total then
     rows[#rows + 1] = {
-      key = "Bridge",
-      value = string.format("%.2f / %.2f GB", bridgeUsed / 1073741824, bridgeTotal / 1073741824),
+      key = "Budget",
+      value = string.format("%.0f / %.0f / %.1f G", bridge.total / 1024, (bridge.pid or 0) / 1024, (bridge.floor or 0) / 1024),
     }
   end
   if #topFps > 0 then
     rows[#rows + 1] = { key = "FPS", value = table.concat(topFps, " · ") }
   end
+  if bridge.used and bridge.total and bridge.used > bridge.total * 1048576 then
+    rows[#rows + 1] = { key = "WARN", value = "usage above total budget" }
+  end
   barWidget.setTooltip(rows)
+end
+
+function onExit()
+  pcall(function()
+    noctalia.removeFile(HEARTBEAT)
+  end)
 end
