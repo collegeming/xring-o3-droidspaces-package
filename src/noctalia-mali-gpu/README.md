@@ -16,6 +16,18 @@ Noctalia 5.x 的 Luau 插件。默认只在顶栏显示一个小图标，不显�
 
 插件只读本机 sysfs/procfs 和 MaliBridge 本地 socket，不联网。
 
+## 预算面板（原 mb-tray 菜单）
+
+点击顶栏图标打开 `collegeming/mali-gpu:budget` 面板，复刻 mb-tray 的 SNI 菜单能力：
+
+- 总预算 2/3/4/6/8 G、单客户端 1/2/3/4 G、MemAvailable 下限 1.5/2/2.5/3 G
+- 立即应用、应用并保存（`mbctl set ... --persist`）
+- 打开报告 / 打开日志
+
+面板写入仍然走 `mbctl` 和同一个 control socket；Noctalia 插件不可用时会回退到
+mb-tray 的托盘菜单。
+
+
 
 ## 为什么没有“GPU 占用率”
 
