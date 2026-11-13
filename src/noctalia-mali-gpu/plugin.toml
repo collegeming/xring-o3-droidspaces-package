@@ -1,0 +1,13 @@
+id = "collegeming/mali-gpu"
+name = "Mali GPU"
+version = "1.0.0"
+plugin_api = 3
+author = "collegeming"
+license = "MIT"
+icon = "gpu"
+description = "Mali-G2-Ultra-NX frequency, temperature, MaliBridge budget and per-app FPS."
+dependencies = []
+
+[[widget]]
+id = "status"
+entry = "widget.luau"

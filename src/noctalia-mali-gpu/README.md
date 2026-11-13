@@ -1,0 +1,53 @@
+# Noctalia Mali GPU widget (`collegeming/mali-gpu`)
+
+Noctalia 5.x 的 Luau 插件，在顶栏显示 XRING-O3 / Mali-G2-Ultra-NX 的：
+
+- 当前/最大 GPU 频率（`gpufreq_core` devfreq）
+- GPU 温度（`gpu-ss-max` thermal zone）
+- MaliBridge 预算/占用（`mbctl status --json`）
+- 每应用 FPS（`/opt/mb-sock/malibridge-report.json` 的 `fps_p50`）
+
+悬浮显示详情。插件只读本机 sysfs/procfs 和 MaliBridge 本地 socket，不联网。
+
+## 为什么没有“GPU 占用率”
+
+Mali kbase 的 debugfs `mali0/dvfs_utilization` 在本机是冻结/下溢的计数（渲染负载下也不变化），
+kbase 也没有 `utilization` 节点。插件因此不伪造百分比，只显示频率、温度、内存和 FPS。
+如果后续内核/驱动提供可用的 busy 计数，可在 `widget.luau` 里加一项。
+
+## 安装
+
+```sh
+mkdir -p ~/.local/share/noctalia/plugins
+cp -a mali-gpu ~/.local/share/noctalia/plugins/
+```
+
+在 `~/.local/state/noctalia/settings.toml` 启用并添加实例：
+
+```toml
+[plugins]
+enabled = [ "collegeming/mali-gpu" ]
+
+[bar.default]
+center = [ "workspaces", "taskbar", "gpu" ]
+
+[widget.gpu]
+type = "collegeming/mali-gpu:status"
+```
+
+重启 Noctalia 或在 设置 → 插件 中启用。
+
+## 数据源
+
+| 指标 | 路径 |
+| --- | --- |
+| 型号 | `/sys/class/misc/mali0/device/gpuinfo` |
+| 频率 | `/sys/class/devfreq/gpufreq_core/{cur_freq,max_freq}` |
+| 温度 | `/sys/class/thermal/thermal_zone*/temp`（`type` 含 `gpu`，优先 `gpu-ss-max`） |
+| 桥接显存 | `mbctl status --json`（`/opt/mali-stack/current/bin/mbctl`） |
+| 每应用 FPS | `/opt/mb-sock/malibridge-report.json` |
+
+## 兼容性
+
+- `plugin_api = 3`，只使用 `readFile`/`listDir`/`runAsync`/`json`/`setUpdateInterval`/`setText`/`setTooltip`。
+- 适用于 Noctalia 5.4.1（archniri24）验证；无 Noctalia 时不影响其它桌面。
