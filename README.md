@@ -198,6 +198,20 @@ flowchart LR
 
 **适用场景**：升级 Mesa/MaliBridge；重建镜像；复现一台设备；审计 bundle 内容。
 
+### 3.9 上游同步策略
+
+| 组件 | 构建来源 | 同步方式 |
+| --- | --- | --- |
+| niri / Smithay | `SuperTurtleDev/anland` 的 `legacy` + 本仓库 `patches/anland`、`patches/smithay` | 更新 `anland_ref` 或补丁；没有长期源码 fork |
+| Anland Android consumer APK | `collegeming/anland-mali` 的 `mali-stride-fix` | 合并上游 `legacy`/`Gold`；fork 独有代码是两处 Mali consumer 修复（stride=0 回退宽度、root probe 失败时本地 socket stat）；APK 由 fork 的 `build-mali-apk.yml` 构建 |
+| Mesa | `lfdevs/mesa-for-android-container` + `patches/mesa` | 跟进上游 commit，重跑补丁脚本 |
+| MaliBridge | `ASEbrahim/MaliBridge` + `patches/malibridge` | 跟进上游 commit，重跑补丁脚本 |
+| mark-shot | `collegeming/aur-release` 的 `mark-shot-arch-bin` | AUR 包更新后重新下载 |
+
+niri/Smithay、Mesa、MaliBridge 都按“上游源码 + patch”构建，不维护长期源码 fork；Anland 的 producer 侧同样如此。只有 Android consumer APK 目前仍由 fork 承载设备改动，这些改动尚未转成 patch。
+
+**适用场景**：跟进上游安全修复；升级合成器或 MaliBridge；评估是否可以把 consumer 改动迁回 patch 构建。
+
 ## 4. 仓库结构
 
 | 路径 | 内容 | 对应改造 |
@@ -275,7 +289,7 @@ ls -l /opt/mb-sock/mali.sock /opt/mb-sock/control.sock
 | 项目 | 关系 |
 | --- | --- |
 | [collegeming/Droidspaces-Arch-Niri-rootfs-builder](https://github.com/collegeming/Droidspaces-Arch-Niri-rootfs-builder) | 构建容器 rootfs；消费本仓库的 Mali 栈 bundle 与 niri 包 |
-| [collegeming/anland-mali](https://github.com/collegeming/anland-mali) | 本设备 Anland fork（Gold 身份、Touch、AFBC） |
+| [collegeming/anland-mali](https://github.com/collegeming/anland-mali) | Android consumer APK 的 fork：额外两处 Mali consumer 修复；Gold 身份/沉浸输入来自合并的 Gold 分支；niri producer 不依赖该 fork |
 | [ASEbrahim/MaliBridge](https://github.com/ASEbrahim/MaliBridge) | MaliBridge 上游；本仓库以补丁形式维护设备改动 |
 | [Goldzxcbug/anland](https://github.com/Goldzxcbug/anland) | Droidspaces 集成分支 |
 | [ravindu644/Droidspaces-OSS](https://github.com/ravindu644/Droidspaces-OSS) | Droidspaces 运行时 |
