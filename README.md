@@ -203,16 +203,29 @@ flowchart LR
 | 组件 | 构建来源 | 同步方式 |
 | --- | --- | --- |
 | niri / Smithay | `SuperTurtleDev/anland` 的 `legacy` + 本仓库 `patches/anland`、`patches/smithay` | 更新 `anland_ref` 或补丁；没有长期源码 fork |
-| Anland Android consumer APK | `collegeming/anland-mali` 的 `mali-stride-fix` | 合并上游 `legacy`/`Gold`；fork 独有代码是两处 Mali consumer 修复（stride=0 回退宽度、root probe 失败时本地 socket stat）；APK 由 fork 的 `build-mali-apk.yml` 构建 |
+| Anland Android consumer APK | 上游 `SuperTurtleDev/anland` 的 `legacy`（`build-anland-consumer`） | 上游 5.23-legacy 已移除 `SecondaryActivity`；当前 Droidspaces app 的“启动”按钮仍调用它，因此生产兼容包继续使用 5.19 构建（release `anland-consumer-compat-5.19`）；上游包（`anland-consumer-mali`）用于独立或已适配新契约的集成 |
 | Mesa | `lfdevs/mesa-for-android-container` + `patches/mesa` | 跟进上游 commit，重跑补丁脚本 |
 | MaliBridge | `ASEbrahim/MaliBridge` + `patches/malibridge` | 跟进上游 commit，重跑补丁脚本 |
 | mark-shot | `collegeming/aur-release` 的 `mark-shot-arch-bin` | AUR 包更新后重新下载 |
 
-niri/Smithay、Mesa、MaliBridge 都按“上游源码 + patch”构建，不维护长期源码 fork；Anland 的 producer 侧同样如此。只有 Android consumer APK 目前仍由 fork 承载设备改动，这些改动尚未转成 patch。
+niri/Smithay、Mesa、MaliBridge 都按“上游源码 + patch”构建，不维护长期源码 fork；Anland 的 producer 侧同样如此。Android consumer APK 有两条构建：5.19 兼容包供当前 Droidspaces app 使用，上游 5.23-legacy 包供独立启动或已适配新 activity 契约的集成使用。两处 Mali consumer 修复（stride=0 回退宽度、root probe 失败时本地 socket stat）在当前设备日志中未被触发，属于防御性改动。
 
 **适用场景**：跟进上游安全修复；升级合成器或 MaliBridge；评估是否可以把 consumer 改动迁回 patch 构建。
 
-## 4. 仓库结构
+## 4. Release 矩阵
+
+| 产物 | 构建入口 | Release tag | 资产 |
+| --- | --- | --- | --- |
+| Mali 栈 bundle | `build-malibridge` + `build-mesa` + `scripts/make-mali-stack-bundle.sh` | `xring-o3-mali-stack-<date>` | `.tar.zst` + `.sha256` |
+| host bundle + KSU 模块 | `build-malibridge` 的 host 资产 + KSU 打包脚本 | `xring-o3-mali-host-<date>` | host `.tar.zst`、KSU `.zip`、sha256 |
+| niri-anland + xorg-xwayland | `build-niri-package` | `anland-niri-packages` | `niri-anland-*.pkg.tar.xz`、`xorg-xwayland-*.pkg.tar.xz`、manifest |
+| Gold Keyboard KSU | `build-gold-keyboard-ksu`（`publish=true`） | `gold-keyboard-ksu-v<ver>-yingtian` | `.zip` + `.sha256` |
+| Anland consumer APK（Droidspaces 兼容） | 5.19 兼容构建，本仓库发布 | `anland-consumer-compat-5.19` | `.apk` + `.sha256` |
+| Anland consumer APK（上游） | `build-anland-consumer`（上游 `legacy`） | `anland-consumer-mali` | `.apk` + `.sha256`；不含 `SecondaryActivity`，仅独立/新集成 |
+
+使用者只需从 Releases 下载资产，不需要拉源码编译。两个 consumer APK 的签名不同，覆盖安装前先执行 `pm uninstall -k com.anland.consumer`；Droidspaces app 的 Anland “启动”按钮当前只匹配 5.19 兼容包。
+
+## 5. 仓库结构
 
 | 路径 | 内容 | 对应改造 |
 | --- | --- | --- |
@@ -231,7 +244,7 @@ niri/Smithay、Mesa、MaliBridge 都按“上游源码 + patch”构建，不维
 | `.github/workflows/` | 补丁验证、MaliBridge/Mesa/niri/Gold 构建 | 3.8 |
 | `docs/` | 架构、复现、整合分析 | 全篇 |
 
-## 5. 使用场景速查
+## 6. 使用场景速查
 
 | 场景 | 使用什么 | 注意 |
 | --- | --- | --- |
@@ -245,7 +258,7 @@ niri/Smithay、Mesa、MaliBridge 都按“上游源码 + patch”构建，不维
 | 升级 Mali 栈 | 本仓库 bundle + builder 的 URL/sha256 | 版本目录并存，`current` 原子切换 |
 | 设备重启 | KSU 模块 + LKM + 容器 + bridge | root 是临时的，重启后需重新 root |
 
-## 6. 验证基线
+## 7. 验证基线
 
 基线：2026-11-13，镜像 23（Mali 栈 2026.11.12-v1），`archniri23`，输出 3408×2272@120、scale 2。
 
@@ -271,7 +284,7 @@ ls -l /opt/mb-sock/mali.sock /opt/mb-sock/control.sock
 
 证据等级：本文中的设备行为为实测；协议版本来自 `wayland-info`；L2 与功耗相关判断为未验证项，不据此下结论。
 
-## 7. 已知边界
+## 8. 已知边界
 
 1. **L2 零拷贝未验证**：`create_immed` 只证明应用/桥接侧使用 DMA-BUF；合成器导入与直接 scanout 尚未取得证据。
 2. **dmabuf v3**：没有 v4 feedback 和 v5 严格 modifier 校验；不影响零拷贝成立，影响 per-surface/设备偏好与布局优化。
@@ -283,13 +296,14 @@ ls -l /opt/mb-sock/mali.sock /opt/mb-sock/control.sock
 8. **镜像源滞后**：ALARM 镜像同步时间不一致；镜像内配置阿里云优先、官方兜底，仍可能出现“本地包比仓库新”的警告，安装依赖时需确认不会触发降级。
 9. **Java2D Vulkan 回退**：宿主可用内存接近预算下限时，`vkCreateDevice` 可能返回 `VK_ERROR_OUT_OF_DEVICE_MEMORY`；JBR 的回退路径存在崩溃风险，属于低频问题。
 10. **功耗不可排名**：设备充电时传感器数据不能用于整机功耗排名。
+11. **Anland consumer APK 契约**：上游 5.23 只提供 `MainActivity`/`SettingsActivity`；当前 Droidspaces app 的 Anland “启动”仍调用 `SecondaryActivity`，生产使用 5.19 兼容包。迁移到上游包需要补兼容 activity 或更新 Droidspaces app。
 
-## 8. 关联项目
+## 9. 关联项目
 
 | 项目 | 关系 |
 | --- | --- |
 | [collegeming/Droidspaces-Arch-Niri-rootfs-builder](https://github.com/collegeming/Droidspaces-Arch-Niri-rootfs-builder) | 构建容器 rootfs；消费本仓库的 Mali 栈 bundle 与 niri 包 |
-| [collegeming/anland-mali](https://github.com/collegeming/anland-mali) | Android consumer APK 的 fork：额外两处 Mali consumer 修复；Gold 身份/沉浸输入来自合并的 Gold 分支；niri producer 不依赖该 fork |
+| [collegeming/anland-mali](https://github.com/collegeming/anland-mali) | 5.19 兼容 consumer APK 的来源（保留 `SecondaryActivity`）；已停止新增功能；niri producer 不依赖该 fork |
 | [ASEbrahim/MaliBridge](https://github.com/ASEbrahim/MaliBridge) | MaliBridge 上游；本仓库以补丁形式维护设备改动 |
 | [Goldzxcbug/anland](https://github.com/Goldzxcbug/anland) | Droidspaces 集成分支 |
 | [ravindu644/Droidspaces-OSS](https://github.com/ravindu644/Droidspaces-OSS) | Droidspaces 运行时 |
