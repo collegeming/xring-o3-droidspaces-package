@@ -1,0 +1,27 @@
+--- a/producers/niri/anland_backend/input.rs
++++ b/producers/niri/anland_backend/input.rs
+@@ -285,12 +285,18 @@
+         }
+     }
+ 
+-    fn amount_v120(&self, axis: Axis) -> Option<f64> {
+-        match (self.axis, axis) {
+-            (0, Axis::Vertical) | (1, Axis::Horizontal) => Some(f64::from(self.discrete) * 120.),
+-            _ => None,
+-        }
+-    }
++    fn amount_v120(&self, axis: Axis) -> Option<f64> {
++        match (self.axis, axis) {
++            (0, Axis::Vertical) | (1, Axis::Horizontal) if self.discrete != 0 => {
++                Some(f64::from(self.discrete) * 120.)
++            }
++            // The Android consumer reports wheel/touchpad scrolling as value-only
++            // events with discrete = 0. Advertising axis_value120(0) makes clients
++            // that prefer high-resolution scrolling ignore the classic axis event.
++            // Omit v120 in that case so they fall back to amount().
++            _ => None,
++        }
++    }
+ 
+     fn source(&self) -> AxisSource {
+         AxisSource::Wheel
