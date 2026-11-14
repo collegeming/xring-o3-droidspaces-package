@@ -6,7 +6,10 @@
 #                            plus patches/malibridge/malibridge-wl-gone-shim.c
 #                            built as libvkb_wl_gone.so
 #   server                   patches/malibridge/malibridge-mem-budget-patch.py,
-#                            then patches/malibridge/malibridge-afbc-export-metadata-patch.py
+#                            then patches/malibridge/malibridge-bind-guard-patch.py
+#                            (a bind naming VK_NULL_HANDLE is refused before the
+#                            vendor driver sees it), then
+#                            patches/malibridge/malibridge-afbc-export-metadata-patch.py
 #                            (the port of ASEbrahim/MaliBridge e7ee6be), then
 #                            patches/malibridge/0001-control-socket.patch (the
 #                            budget control socket the host scripts wait for),
@@ -44,7 +47,7 @@ on:
         type: boolean
         default: true
       server:
-        description: 'build the Android arm64-v8a server (mem-budget + AFBC export metadata + control socket)'
+        description: 'build the Android arm64-v8a server (mem-budget + null bind guard + AFBC export metadata + control socket)'
         type: boolean
         default: true
       publish:
@@ -276,6 +279,8 @@ jobs:
           test -f malibridge/common/gen/vkb_gen_server.c
           python3 -I patches/malibridge/malibridge-mem-budget-patch.py --check malibridge \
             | tee stage/build-info/patch-preflight.txt
+          python3 -I patches/malibridge/malibridge-bind-guard-patch.py --check malibridge \
+            | tee -a stage/build-info/patch-preflight.txt
           python3 -I patches/malibridge/malibridge-afbc-export-metadata-patch.py --check malibridge \
             | tee -a stage/build-info/patch-preflight.txt
           # The control socket is a separate diff on top of both patches, so it is
@@ -289,6 +294,12 @@ jobs:
           python3 -I patches/malibridge/malibridge-mem-budget-patch.py malibridge \
             | tee stage/build-info/patch-applied.txt
           python3 -I patches/malibridge/malibridge-mem-budget-patch.py --verify-candidate malibridge
+          # The bind guard edits vkb_gen_server.c too: it is applied after the
+          # memory budget and before the AFBC patch (which touches
+          # server_emu_layer.c only).
+          python3 -I patches/malibridge/malibridge-bind-guard-patch.py malibridge \
+            | tee -a stage/build-info/patch-applied.txt
+          python3 -I patches/malibridge/malibridge-bind-guard-patch.py --verify-candidate malibridge
           python3 -I patches/malibridge/malibridge-afbc-export-metadata-patch.py malibridge \
             | tee -a stage/build-info/patch-applied.txt
           python3 -I patches/malibridge/malibridge-afbc-export-metadata-patch.py --verify-candidate malibridge
@@ -344,6 +355,15 @@ jobs:
             > stage/build-info/budget-marker.txt
           strings stage/vkbridge-server | grep -F 'MemAvailable is under the floor' \
             > stage/build-info/floor-marker.txt
+          # A bind of a refused allocation is answered by the server, not the driver.
+          strings stage/vkbridge-server | grep -F 'the allocation was refused, probably by the memory budget' \
+            > stage/build-info/bind-guard-marker.txt
+          strings stage/vkbridge-server | grep -F 'names a null buffer' \
+            >> stage/build-info/bind-guard-marker.txt
+          strings stage/vkbridge-server | grep -F 'names a null image' \
+            >> stage/build-info/bind-guard-marker.txt
+          strings stage/vkbridge-server | grep -F 'bind infos but' \
+            >> stage/build-info/bind-guard-marker.txt
           strings stage/vkbridge-server | grep -F "dma-buf export's; made at modifier" \
             > stage/build-info/afbc-marker.txt
           # The host scripts wait for control.sock; a server without this marker
@@ -361,6 +381,7 @@ jobs:
             > stage/build-info/source-blobs.txt
           dpkg-query -W > stage/build-info/build-packages.txt
           cp patches/malibridge/malibridge-mem-budget-patch.py \
+             patches/malibridge/malibridge-bind-guard-patch.py \
              patches/malibridge/malibridge-afbc-export-metadata-patch.py \
              patches/malibridge/0001-control-socket.patch stage/build-info/
           rm -f malibridge-server-aarch64.tar.zst SHA256SUMS
@@ -500,7 +521,9 @@ jobs:
           else
             {
               printf 'MaliBridge server for the XRING-O3 Mali stack, built from ASEbrahim/MaliBridge %s\n' "$MB_REVISION"
-              printf 'with patches/malibridge/malibridge-mem-budget-patch.py and\n'
+              printf 'with patches/malibridge/malibridge-mem-budget-patch.py,\n'
+              printf 'patches/malibridge/malibridge-bind-guard-patch.py (a bind naming VK_NULL_HANDLE\n'
+              printf 'is refused before the vendor driver sees it) and\n'
               printf 'patches/malibridge/malibridge-afbc-export-metadata-patch.py (upstream e7ee6be).\n\n'
               printf 'Assets: the Android bionic AArch64 vkbridge-server SHA-256 manifest, the host bundle\n'
               printf 'xring-o3-mali-host-%s.tar.zst and the KernelSU module\n' "$HOST_BUNDLE_VERSION"
