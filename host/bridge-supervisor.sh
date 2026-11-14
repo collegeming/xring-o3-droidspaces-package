@@ -5,6 +5,10 @@
 # it owns server.pid, waits for the sockets, drops oom_score_adj to 0 and
 # reaps the server. start-bridge.sh launches it with setsid; do not run it in
 # the foreground of an interactive shell unless you want it to block.
+#
+# The server is restarted with backoff if it exits unexpectedly. A bridge
+# crash used to leave the whole desktop without GPU until a manual restart;
+# the supervisor now rebuilds the sockets and starts a fresh server.
 # Configuration: environment > $SRV/host.env > defaults (see host.env.example).
 
 set -u
@@ -36,8 +40,8 @@ done
 : "${CTR:=archniri}"
 : "${SRV:=/data/local/tmp/xring-o3-host}"
 : "${ROOTFS:=/data/local/Droidspaces/Containers/$CTR/rootfs}"
-: "${BUDGET_TOTAL_MB:=4096}"
-: "${BUDGET_PID_MB:=2048}"
+: "${BUDGET_TOTAL_MB:=6144}"
+: "${BUDGET_PID_MB:=3072}"
 : "${BUDGET_FLOOR_MB:=2048}"
 : "${MAP_LIMIT:=60000}"
 : "${CONTROL_UIDS:=1000}"
@@ -58,13 +62,6 @@ die() { printf '[bridge-supervisor] 错误: %s\n' "$*" >&2; exit 1; }
 
 [ -d "$SOCK_DIR" ] || mkdir -p "$SOCK_DIR" || die "无法创建 $SOCK_DIR"
 chmod 0777 "$SOCK_DIR" 2>/dev/null || true
-rm -f "$MALI_SOCK" "$CONTROL_SOCK"
-
-# Never leave a dead socket behind, even if the server dies of a signal.
-cleanup() {
-    rm -f "$MALI_SOCK" "$CONTROL_SOCK" 2>/dev/null || true
-}
-trap 'cleanup' EXIT
 
 : "${VKBRIDGE_CONTROL_CONF:=$BUDGET_CONF}"
 : "${VKBRIDGE_CONTROL_SOCK:=$CONTROL_SOCK}"
@@ -78,20 +75,55 @@ export VKBRIDGE_CONTROL_CONF VKBRIDGE_CONTROL_SOCK VKBRIDGE_CONTROL_UIDS
 export VKBRIDGE_MEM_BUDGET_TOTAL_MB VKBRIDGE_MEM_BUDGET_PID_MB
 export VKBRIDGE_MEM_MIN_AVAIL_MB VKBRIDGE_MAP_LIMIT VKBRIDGE_MEM_STATS
 
-"$SERVER" --socket "$MALI_SOCK" --log "$LOG" </dev/null >"$STDOUT" 2>&1 &
-P=$!
-echo "$P" > "$SRV/server.pid"
-trap 'if [ -n "${P:-}" ]; then kill -TERM "$P" 2>/dev/null; wait "$P" 2>/dev/null; fi; exit 0' TERM INT
+stopping=0
+P=
+cleanup() {
+    rm -f "$MALI_SOCK" "$CONTROL_SOCK" 2>/dev/null || true
+}
+on_stop() {
+    stopping=1
+    if [ -n "${P:-}" ]; then
+        kill -TERM "$P" 2>/dev/null || true
+        wait "$P" 2>/dev/null || true
+    fi
+    cleanup
+    exit 0
+}
+trap on_stop TERM INT
 
-_n=0
-while [ "$_n" -lt 40 ]; do
-    [ -S "$MALI_SOCK" ] && [ -S "$CONTROL_SOCK" ] && break
-    _n=$((_n + 1))
-    sleep 0.3
+restarts=0
+while [ "$stopping" = 0 ]; do
+    # A dead server leaves stale socket inodes behind; remove them before bind.
+    rm -f "$MALI_SOCK" "$CONTROL_SOCK"
+    started_at=$(date +%s 2>/dev/null || echo 0)
+    "$SERVER" --socket "$MALI_SOCK" --log "$LOG" </dev/null >"$STDOUT" 2>&1 &
+    P=$!
+    echo "$P" > "$SRV/server.pid"
+
+    _n=0
+    while [ "$_n" -lt 40 ]; do
+        [ -S "$MALI_SOCK" ] && [ -S "$CONTROL_SOCK" ] && break
+        _n=$((_n + 1))
+        sleep 0.3
+    done
+    # The server may create both sockets after it has loaded the vendor driver.
+    chmod 0666 "$MALI_SOCK" "$CONTROL_SOCK" 2>/dev/null || true
+    echo 0 > "/proc/$P/oom_score_adj" 2>/dev/null || true
+
+    wait "$P"
+    rc=$?
+    [ "$stopping" = 1 ] && break
+
+    ended_at=$(date +%s 2>/dev/null || echo 0)
+    if [ "$started_at" -gt 0 ] && [ "$ended_at" -gt 0 ] && [ $((ended_at - started_at)) -ge 60 ]; then
+        restarts=0
+    fi
+    restarts=$((restarts + 1))
+    delay=2
+    [ "$restarts" -ge 5 ] && delay=10
+    [ "$restarts" -ge 10 ] && delay=30
+    printf '[bridge-supervisor] server exited rc=%s; restart #%s in %ss\n' "$rc" "$restarts" "$delay" >&2
+    sleep "$delay"
 done
 
-# The server may create both sockets after it has loaded the vendor driver.
-chmod 0666 "$MALI_SOCK" "$CONTROL_SOCK" 2>/dev/null || true
-echo 0 > "/proc/$P/oom_score_adj" 2>/dev/null || true
-
-wait "$P"
+cleanup
