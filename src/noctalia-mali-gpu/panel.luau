@@ -15,6 +15,8 @@ local selPid = 2
 local selFloor = 2
 local st = { used = nil, total = nil, clients = nil, availKb = nil }
 local busy = false
+local statusMsg = nil
+local statusErr = false
 
 local function refresh(cb)
   noctalia.runAsync(MBCTL .. " status --json", function(result)
@@ -54,16 +56,48 @@ local function apply(persist)
     return
   end
   busy = true
+  statusMsg = persist and "正在应用并保存…" or "正在应用…"
+  statusErr = false
+  render()
   local cmd = string.format(
-    "%s set --total %d --pid %d --floor %d%s",
+    "%s set --total %d --pid %d --floor %d%s --json",
     MBCTL,
     selTotal * 1024,
     selPid * 1024,
     math.floor(selFloor * 1024),
     persist and " --persist" or ""
   )
-  noctalia.runAsync(cmd, function()
+  noctalia.runAsync(cmd, function(result)
     busy = false
+    local ok = result and result.exitCode == 0
+    local detail = nil
+    if result and result.stdout and result.stdout ~= "" then
+      local parsed, data = pcall(function()
+        return noctalia.json.decode(result.stdout)
+      end)
+      if parsed and type(data) == "table" then
+        if data.ok == false then
+          ok = false
+        end
+        if data.error then
+          detail = tostring(data.error)
+        end
+      end
+    end
+    if ok then
+      statusMsg = string.format(
+        "%s：总预算 %g G / 单客户端 %g G / 下限 %g G",
+        persist and "已应用并保存" or "已应用",
+        selTotal, selPid, selFloor
+      )
+      statusErr = false
+    else
+      statusMsg = string.format(
+        "应用失败%s",
+        detail and (": " .. detail) or (result and (" (exit " .. tostring(result.exitCode) .. ")") or "：未执行")
+      )
+      statusErr = true
+    end
     refresh(render)
   end)
 end
@@ -117,6 +151,11 @@ function render()
       end }),
     }),
     ui.label({ text = table.concat(info, "  |  "), color = "on_surface" }),
+    statusMsg and ui.label({
+      text = statusMsg,
+      color = statusErr and "error" or "primary",
+      fontWeight = "bold",
+    }) or nil,
     ui.separator({}),
     presetRow("总预算", TOTALS, selTotal, "G", function(v)
       selTotal = v
