@@ -121,6 +121,7 @@ jobs:
           source_commit="$(git -C /tmp/anland rev-parse HEAD)"
           for patch in \
               /kit-patches/anland/0001-touch-seat.patch \
+              /kit-patches/anland/0002-pointer-axis-v120.patch \
               /kit-patches/smithay/0001-afbc-linear-size-check.patch; do
               test -f "$patch" || { echo "missing kit patch: $patch" >&2; exit 1; }
               git -C /tmp/anland apply --check "$patch"
