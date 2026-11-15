@@ -8,7 +8,14 @@
 set -u
 
 SELF_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
-ENV_SRV=${SRV:-/data/local/tmp/xring-o3-host}
+# Prefer the host.env next to this script. The old default
+# /data/local/tmp/xring-o3-host/host.env may belong to another container and
+# silently started a second bridge for the wrong rootfs.
+if [ -z "${SRV:-}" ] && [ -r "$SELF_DIR/host.env" ]; then
+    ENV_SRV=$SELF_DIR
+else
+    ENV_SRV=${SRV:-/data/local/tmp/xring-o3-host}
+fi
 : "${HOST_ENV:=$ENV_SRV/host.env}"
 if [ ! -r "$HOST_ENV" ] && [ -r "$SELF_DIR/host.env" ]; then
     HOST_ENV=$SELF_DIR/host.env
